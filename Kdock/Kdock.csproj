@@ -1,0 +1,345 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{A378F2AA-07FB-47D0-BCDA-6AA71FA54F62}</ProjectGuid>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>Kdock</RootNamespace>
+    <AssemblyName>Kdock</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <TargetFrameworkProfile />
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup>
+    <ApplicationIcon>Resources\kdock.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Microsoft.VisualBasic" />
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.DirectoryServices" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Deployment" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="FileObject.cs" />
+    <Compile Include="FileReciever.cs" />
+    <Compile Include="FileSender.cs" />
+    <Compile Include="from\About.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\About.Designer.cs">
+      <DependentUpon>About.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\ActivePlace.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\ActivePlace.Designer.cs">
+      <DependentUpon>ActivePlace.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\Apps.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\Apps.Designer.cs">
+      <DependentUpon>Apps.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\Connect.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\Connect.Designer.cs">
+      <DependentUpon>Connect.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\frmAccess.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\frmAccess.Designer.cs">
+      <DependentUpon>frmAccess.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\frmFileStatus.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\frmFileStatus.Designer.cs">
+      <DependentUpon>frmFileStatus.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\frmChat.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\frmChat.Designer.cs">
+      <DependentUpon>frmChat.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\frmLanChat.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\frmLanChat.Designer.cs">
+      <DependentUpon>frmLanChat.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\frmNotify.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\frmNotify.Designer.cs">
+      <DependentUpon>frmNotify.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\frmRemote.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\frmRemote.Designer.cs">
+      <DependentUpon>frmRemote.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\KdockMain.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\KdockMain.Designer.cs">
+      <DependentUpon>KdockMain.cs</DependentUpon>
+    </Compile>
+    <Compile Include="clsss\KGlobal.cs" />
+    <Compile Include="control\klabel.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="control\klabel.Designer.cs">
+      <DependentUpon>klabel.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\LAN.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\LAN.Designer.cs">
+      <DependentUpon>LAN.cs</DependentUpon>
+    </Compile>
+    <Compile Include="control\KShortcut.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Include="control\KShortcut.Designer.cs">
+      <DependentUpon>KShortcut.cs</DependentUpon>
+    </Compile>
+    <Compile Include="control\KToggleSwitch.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Include="control\KToggleSwitch.Designer.cs">
+      <DependentUpon>KToggleSwitch.cs</DependentUpon>
+    </Compile>
+    <Compile Include="control\LanPC.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Include="control\LanPC.Designer.cs">
+      <DependentUpon>LanPC.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\Note.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\Note.Designer.cs">
+      <DependentUpon>Note.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Imaging\EncoderParameters.cs" />
+    <Compile Include="NetworkCommunication.cs" />
+    <Compile Include="NetworkPackage.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="control\ProgressLite.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="control\ProgressLite.Designer.cs">
+      <DependentUpon>ProgressLite.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="from\RemoteFiles.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\RemoteFiles.Designer.cs">
+      <DependentUpon>RemoteFiles.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\frmTheme.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\frmTheme.Designer.cs">
+      <DependentUpon>frmTheme.cs</DependentUpon>
+    </Compile>
+    <Compile Include="from\web.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="from\web.Designer.cs">
+      <DependentUpon>web.cs</DependentUpon>
+    </Compile>
+    <Compile Include="clsss\RemoteClient.cs" />
+    <Compile Include="control\ucFIle.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Include="control\ucFIle.Designer.cs">
+      <DependentUpon>ucFIle.cs</DependentUpon>
+    </Compile>
+    <Compile Include="control\ucFolder.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Include="control\ucFolder.Designer.cs">
+      <DependentUpon>ucFolder.cs</DependentUpon>
+    </Compile>
+    <Compile Include="control\ucNotification.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Include="control\ucNotification.Designer.cs">
+      <DependentUpon>ucNotification.cs</DependentUpon>
+    </Compile>
+    <Compile Include="control\ucShortcut.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Include="control\ucShortcut.Designer.cs">
+      <DependentUpon>ucShortcut.cs</DependentUpon>
+    </Compile>
+    <Compile Include="clsss\Settings.cs" />
+    <Compile Include="clsss\Theme.cs" />
+    <Compile Include="ucChatFile.cs">
+      <SubType>UserControl</SubType>
+    </Compile>
+    <Compile Include="ucChatFile.Designer.cs">
+      <DependentUpon>ucChatFile.cs</DependentUpon>
+    </Compile>
+    <EmbeddedResource Include="control\KShortcut.resx">
+      <DependentUpon>KShortcut.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="control\KToggleSwitch.resx">
+      <DependentUpon>KToggleSwitch.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="control\ProgressLite.resx">
+      <DependentUpon>ProgressLite.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="control\ucFIle.resx">
+      <DependentUpon>ucFIle.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="control\ucFolder.resx">
+      <DependentUpon>ucFolder.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="control\ucNotification.resx">
+      <DependentUpon>ucNotification.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="control\ucShortcut.resx">
+      <DependentUpon>ucShortcut.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\About.resx">
+      <DependentUpon>About.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\ActivePlace.resx">
+      <DependentUpon>ActivePlace.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\Apps.resx">
+      <DependentUpon>Apps.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\Connect.resx">
+      <DependentUpon>Connect.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\frmAccess.resx">
+      <DependentUpon>frmAccess.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\frmFileStatus.resx">
+      <DependentUpon>frmFileStatus.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\frmChat.resx">
+      <DependentUpon>frmChat.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\frmLanChat.resx">
+      <DependentUpon>frmLanChat.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\frmNotify.resx">
+      <DependentUpon>frmNotify.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\frmRemote.resx">
+      <DependentUpon>frmRemote.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\KdockMain.resx">
+      <DependentUpon>KdockMain.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="control\klabel.resx">
+      <DependentUpon>klabel.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="control\LanPC.resx">
+      <DependentUpon>LanPC.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\LAN.resx">
+      <DependentUpon>LAN.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\Note.resx">
+      <DependentUpon>Note.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\RemoteFiles.resx">
+      <DependentUpon>RemoteFiles.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\frmTheme.resx">
+      <DependentUpon>frmTheme.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="from\web.resx">
+      <DependentUpon>web.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Properties\Resources.resx">
+      <Generator>ResXFileCodeGenerator</Generator>
+      <LastGenOutput>Resources.Designer.cs</LastGenOutput>
+      <SubType>Designer</SubType>
+    </EmbeddedResource>
+    <Compile Include="Properties\Resources.Designer.cs">
+      <AutoGen>True</AutoGen>
+      <DependentUpon>Resources.resx</DependentUpon>
+      <DesignTime>True</DesignTime>
+    </Compile>
+    <EmbeddedResource Include="ucChatFile.resx">
+      <DependentUpon>ucChatFile.cs</DependentUpon>
+    </EmbeddedResource>
+    <None Include="app.config" />
+    <None Include="Properties\Settings.settings">
+      <Generator>SettingsSingleFileGenerator</Generator>
+      <LastGenOutput>Settings.Designer.cs</LastGenOutput>
+    </None>
+    <Compile Include="Properties\Settings.Designer.cs">
+      <AutoGen>True</AutoGen>
+      <DependentUpon>Settings.settings</DependentUpon>
+      <DesignTimeSharedInput>True</DesignTimeSharedInput>
+    </Compile>
+  </ItemGroup>
+  <ItemGroup>
+    <COMReference Include="IWshRuntimeLibrary">
+      <Guid>{F935DC20-1CF0-11D0-ADB9-00C04FD58A0B}</Guid>
+      <VersionMajor>1</VersionMajor>
+      <VersionMinor>0</VersionMinor>
+      <Lcid>0</Lcid>
+      <WrapperTool>tlbimp</WrapperTool>
+      <Isolated>False</Isolated>
+      <EmbedInteropTypes>True</EmbedInteropTypes>
+    </COMReference>
+    <COMReference Include="SpeechLib">
+      <Guid>{C866CA3A-32F7-11D2-9602-00C04F8EE628}</Guid>
+      <VersionMajor>5</VersionMajor>
+      <VersionMinor>4</VersionMinor>
+      <Lcid>0</Lcid>
+      <WrapperTool>tlbimp</WrapperTool>
+      <Isolated>False</Isolated>
+      <EmbedInteropTypes>True</EmbedInteropTypes>
+    </COMReference>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Resources\kdock.ico" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
