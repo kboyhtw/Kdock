@@ -1,0 +1,12 @@
+E:\Projects\Kdock\build-test\Kdock.Wire.deps.json
+E:\Projects\Kdock\build-test\Kdock.Wire.dll
+E:\Projects\Kdock\build-test\Kdock.Wire.pdb
+E:\Projects\Kdock\obj-test\Kdock.Wire.GeneratedMSBuildEditorConfig.editorconfig
+E:\Projects\Kdock\obj-test\Kdock.Wire.AssemblyInfoInputs.cache
+E:\Projects\Kdock\obj-test\Kdock.Wire.AssemblyInfo.cs
+E:\Projects\Kdock\obj-test\Kdock.Wire.csproj.CoreCompileInputs.cache
+E:\Projects\Kdock\obj-test\Kdock.Wire.sourcelink.json
+E:\Projects\Kdock\obj-test\Kdock.Wire.dll
+E:\Projects\Kdock\obj-test\refint\Kdock.Wire.dll
+E:\Projects\Kdock\obj-test\Kdock.Wire.pdb
+E:\Projects\Kdock\obj-test\ref\Kdock.Wire.dll

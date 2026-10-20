@@ -1,0 +1,137 @@
+<Window x:Class="Kdock.App.RemoteWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Remote screen"
+        Width="1100"
+        Height="700"
+        MinWidth="720"
+        MinHeight="480"
+        Background="Black"
+        WindowStartupLocation="CenterScreen"
+        KeyDown="WindowKeyDown"
+        KeyUp="WindowKeyUp">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition x:Name="ChatColumn" Width="0"/>
+        </Grid.ColumnDefinitions>
+        <Grid x:Name="PictureHost" Background="Black" MouseMove="PictureMouseMove" MouseDown="PictureMouseDown" MouseUp="PictureMouseUp" MouseWheel="PictureWheel">
+            <Image x:Name="ScreenImage" Stretch="Uniform" IsHitTestVisible="False"/>
+            <Border x:Name="CommandBar" VerticalAlignment="Top" HorizontalAlignment="Center" Margin="0,12,0,0" Padding="10,8" Background="#E6151922" BorderBrush="#2A3648" BorderThickness="1" CornerRadius="12">
+                <StackPanel Orientation="Horizontal">
+                    <Button Content="Files" Click="FilesClick" Style="{StaticResource ToolbarButton}" Padding="10,5"/>
+                    <Button Content="Chat" Click="ChatClick" Style="{StaticResource ToolbarButton}" Padding="10,5"/>
+                    <Button Content="Full screen" x:Name="FullButton" Click="FullClick" Style="{StaticResource ToolbarButton}" Padding="10,5"/>
+                    <Button Content="Unpin" x:Name="PinButton" Click="PinClick" Style="{StaticResource ToolbarButton}" Padding="10,5"/>
+                    <TextBlock Text="Quality" VerticalAlignment="Center" Margin="12,0,6,0" Foreground="#F4F7FB"/>
+                    <ComboBox x:Name="QualityBox" Width="268" Height="36" SelectedIndex="2" SelectionChanged="QualityChanged" Background="#FFFFFF" BorderBrush="#C5CDD8" VerticalContentAlignment="Center" Padding="8,2">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="0,2">
+                                    <TextBlock Text="{Binding Title}" Foreground="#12141A" FontWeight="SemiBold"/>
+                                    <TextBlock Text="{Binding Detail}" Foreground="#5C6570" FontSize="10"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                        <ComboBox.ItemContainerStyle>
+                            <Style TargetType="ComboBoxItem">
+                                <Setter Property="Background" Value="#FFFFFF"/>
+                                <Setter Property="Foreground" Value="#12141A"/>
+                                <Setter Property="Padding" Value="8,6"/>
+                            </Style>
+                        </ComboBox.ItemContainerStyle>
+                    </ComboBox>
+                    <Button Content="Stop" Click="StopClick" Style="{StaticResource AccentButton}" Padding="10,5" Margin="8,0,0,0"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+        <Border Grid.Column="1" Background="#0F131A" Padding="12">
+            <DockPanel>
+                <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                    <Button DockPanel.Dock="Right" Content="Send" Click="ChatSendClick" Margin="6,0,0,0" Padding="10,4"/>
+                    <TextBox x:Name="ChatBox" MinHeight="32" VerticalContentAlignment="Center"/>
+                </DockPanel>
+                <ListBox x:Name="ChatList" Background="Transparent" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                            <Setter Property="Padding" Value="0"/>
+                            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="ListBoxItem">
+                                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"/>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Border MaxWidth="260" Padding="8" Margin="0,4" CornerRadius="8">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="HorizontalAlignment" Value="Left"/>
+                                        <Setter Property="Background" Value="#262C3C"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Sender}" Value="You">
+                                                <Setter Property="HorizontalAlignment" Value="Right"/>
+                                                <Setter Property="Background" Value="#1A3A52"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <StackPanel>
+                                    <TextBlock Text="{Binding Sender}" Foreground="#55C2FF" FontSize="11"/>
+                                    <TextBlock Text="{Binding Text}" TextWrapping="Wrap">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding ShowText}" Value="True">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <Border Margin="0,4,0,0" Padding="8" CornerRadius="8" Background="#12141A" MouseLeftButtonUp="OpenAttachmentClick" Cursor="Hand">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsAttachment}" Value="True">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
+                                        <DockPanel>
+                                            <Image Source="{Binding FileIcon}" Width="28" Height="28" Margin="0,0,8,0"/>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding FileName}" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                                <ProgressBar Height="4" Margin="0,6,0,0" Maximum="{Binding ProgressMax}" Value="{Binding FileProgress}" Foreground="#4CC3FF" Background="#2C3344">
+                                                    <ProgressBar.Style>
+                                                        <Style TargetType="ProgressBar">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsSending}" Value="True">
+                                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </ProgressBar.Style>
+                                                </ProgressBar>
+                                                <TextBlock Text="{Binding ProgressText}" FontSize="11" Foreground="#93A0B4" Margin="0,4,0,0"/>
+                                            </StackPanel>
+                                        </DockPanel>
+                                    </Border>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>

@@ -1,0 +1,120 @@
+<Application x:Class="Kdock.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="DockWindow.xaml">
+    <Application.Resources>
+        <SolidColorBrush x:Key="SurfaceBrush" Color="#0B0E14"/>
+        <SolidColorBrush x:Key="SurfaceRaisedBrush" Color="#151922"/>
+        <SolidColorBrush x:Key="SurfaceInsetBrush" Color="#0F131A"/>
+        <SolidColorBrush x:Key="AccentBrush" Color="#4CC3FF"/>
+        <SolidColorBrush x:Key="TextBrush" Color="#F5F7FA"/>
+        <SolidColorBrush x:Key="MutedTextBrush" Color="#8B97A8"/>
+        <SolidColorBrush x:Key="BorderBrush" Color="#243041"/>
+        <SolidColorBrush x:Key="MineBrush" Color="#16324A"/>
+        <SolidColorBrush x:Key="HoverBrush" Color="#1E2633"/>
+        <FontFamily x:Key="UiFont">Segoe UI Variable Text, Segoe UI</FontFamily>
+
+        <Style TargetType="Window">
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="Background" Value="{StaticResource SurfaceBrush}"/>
+        </Style>
+        <Style TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
+            <Setter Property="Foreground" Value="#F5F7FA"/>
+            <Setter Property="Background" Value="#121821"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+            <Setter Property="CaretBrush" Value="#F5F7FA"/>
+            <Setter Property="SelectionBrush" Value="#2B6B93"/>
+            <Setter Property="Padding" Value="10,7"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="Background" Value="#1C2430"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="12,7"/>
+            <Setter Property="Margin" Value="0,6,0,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Chrome" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Chrome" Property="Background" Value="#263140"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Chrome" Property="Background" Value="#334155"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.45"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="GhostButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Margin" Value="0"/>
+            <Setter Property="Padding" Value="10,6"/>
+        </Style>
+        <Style x:Key="AccentButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="#12324A"/>
+            <Setter Property="BorderBrush" Value="#2B6B93"/>
+            <Setter Property="Foreground" Value="#D7F1FF"/>
+        </Style>
+        <Style x:Key="ToolbarButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Margin" Value="0,0,6,0"/>
+            <Setter Property="Padding" Value="11,6"/>
+        </Style>
+        <Style TargetType="ListBox">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/>
+        </Style>
+        <Style TargetType="ListBoxItem">
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Margin" Value="0,2"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border x:Name="Back" Background="Transparent" CornerRadius="8" Padding="6,5">
+                            <ContentPresenter/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Back" Property="Background" Value="#1A222C"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Back" Property="Background" Value="#1A2A3A"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="ProgressBar">
+            <Setter Property="Height" Value="4"/>
+            <Setter Property="Foreground" Value="{StaticResource AccentBrush}"/>
+            <Setter Property="Background" Value="#243041"/>
+            <Setter Property="BorderThickness" Value="0"/>
+        </Style>
+        <Style TargetType="ScrollBar">
+            <Setter Property="Width" Value="8"/>
+        </Style>
+    </Application.Resources>
+</Application>

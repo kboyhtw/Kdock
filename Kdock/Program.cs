@@ -1,21 +1,28 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace Kdock
 {
     static class Program
     {
-        /// <summary>
-        /// The main entry point for the application.
-        /// </summary>
+        [DllImport("kernel32.dll")]
+        private static extern bool AllocConsole();
+
         [STAThread]
         static void Main()
         {
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
+            ApplicationConfiguration.Initialize();
+            string[] args = Environment.GetCommandLineArgs();
+            if (args.Length > 1 && string.Equals(args[1], "--broker", StringComparison.OrdinalIgnoreCase))
+            {
+                int port = 12605;
+                if (args.Length > 2)
+                    int.TryParse(args[2], out port);
+                AllocConsole();
+                DeskBroker.Run(port);
+                return;
+            }
             Application.Run(new KdockMain());
         }
     }
