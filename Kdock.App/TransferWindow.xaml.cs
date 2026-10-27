@@ -13,6 +13,7 @@ public partial class TransferWindow : Window
     public TransferWindow()
     {
         InitializeComponent();
+        WindowSkin.Apply(this);
         Items.ItemsSource = _items;
         SizeChanged += (_, _) => Place();
     }

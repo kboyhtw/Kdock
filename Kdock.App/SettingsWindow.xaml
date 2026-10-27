@@ -1,0 +1,39 @@
+<Window x:Class="Kdock.App.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Settings"
+        Icon="pack://application:,,,/Resources/kdock.ico"
+        Width="520"
+        SizeToContent="Height"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource SurfaceBrush}">
+    <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="12" Margin="8">
+        <DockPanel>
+            <Border DockPanel.Dock="Top" Background="{DynamicResource SurfaceRaisedBrush}" CornerRadius="12,12,0,0" Padding="8,4,4,4" MouseLeftButtonDown="HeaderDrag">
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="✕" Click="CloseClick" Style="{StaticResource CaptionCloseButton}" Width="36" Height="32"/>
+                    <TextBlock Text="Settings" FontWeight="SemiBold" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                </DockPanel>
+            </Border>
+            <StackPanel Margin="24,16,24,24">
+                <TextBlock Text="Appearance" Style="{StaticResource SectionLabel}" Margin="0,0,0,8"/>
+                <Border Background="{DynamicResource SurfaceCardBrush}" CornerRadius="10" Padding="14" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                    <StackPanel>
+                        <RadioButton x:Name="DarkRadio" Content="Dark" GroupName="Theme" Checked="ThemeChanged" Margin="0,0,0,8"/>
+                        <RadioButton x:Name="LightRadio" Content="Light" GroupName="Theme" Checked="ThemeChanged"/>
+                    </StackPanel>
+                </Border>
+
+                <TextBlock Text="Meeting server" Style="{StaticResource SectionLabel}"/>
+                <TextBlock Text="Used to find other PCs on the internet. Both PCs must use the same server." TextWrapping="Wrap" Foreground="{DynamicResource MutedTextBrush}" FontSize="12" Margin="0,0,0,8"/>
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="Save" Click="SaveServerClick" Style="{StaticResource AccentButton}" Padding="16,8" Margin="8,0,0,0"/>
+                    <TextBox x:Name="ServerBox" Height="36" Tag="kdockserver.runasp.net"/>
+                </DockPanel>
+                <TextBlock x:Name="ServerStatus" FontSize="12" Foreground="{DynamicResource SubtleTextBrush}" Margin="0,8,0,0"/>
+            </StackPanel>
+        </DockPanel>
+    </Border>
+</Window>

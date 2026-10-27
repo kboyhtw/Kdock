@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -20,11 +21,13 @@ public sealed class SessionTransport : IWireSession
     private SessionTransport(TcpClient client)
     {
         _client = client;
+        _client.NoDelay = true;
         _stream = client.GetStream();
         RemoteAddress = client.Client.RemoteEndPoint?.ToString() ?? string.Empty;
     }
 
     public string RemoteAddress { get; }
+    public string PeerDeskId { get; private set; } = string.Empty;
     public bool IsConnected => _client.Connected && _stream.CanWrite && Volatile.Read(ref _closed) == 0;
     public bool ProtocolMatched { get; private set; }
 
@@ -38,7 +41,7 @@ public sealed class SessionTransport : IWireSession
         await client.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
         SessionTransport session = new(client);
         session._receiveTask = Task.Run(() => session.ReceiveLoopAsync(session._stop.Token), cancellationToken);
-        await session.SendAsync(WirePacket.Text($"{Protocol.Hello}:{Protocol.Current}:{Protocol.Product}")).ConfigureAwait(false);
+        await session.SendAsync(WirePacket.Text($"{Protocol.Hello}:{Protocol.Current}:{Protocol.Product}:{App.State.DeskId}")).ConfigureAwait(false);
         try
         {
             await session._hello.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
@@ -55,7 +58,7 @@ public sealed class SessionTransport : IWireSession
     {
         SessionTransport session = new(client);
         session._receiveTask = Task.Run(() => session.ReceiveLoopAsync(session._stop.Token), cancellationToken);
-        await session.SendAsync(WirePacket.Text($"{Protocol.Hello}:{Protocol.Current}:{Protocol.Product}"), cancellationToken).ConfigureAwait(false);
+        await session.SendAsync(WirePacket.Text($"{Protocol.Hello}:{Protocol.Current}:{Protocol.Product}:{App.State.DeskId}"), cancellationToken).ConfigureAwait(false);
         try
         {
             await session._hello.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
@@ -131,6 +134,12 @@ public sealed class SessionTransport : IWireSession
             return;
         }
 
+        if (parts.Length >= 4)
+        {
+            string desk = new string(parts[3].Where(char.IsDigit).ToArray());
+            if (desk.Length == 10)
+                PeerDeskId = desk;
+        }
         ProtocolMatched = true;
         _hello.TrySetResult(true);
         StatusChanged?.Invoke("Connected.");

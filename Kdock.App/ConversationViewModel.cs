@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -6,6 +7,7 @@ using System.Linq;
 using System.Net;
 using System.Text;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using Kdock.Wire;
 
@@ -68,6 +70,7 @@ public sealed class ConversationMessage : System.ComponentModel.INotifyPropertyC
         }
     }
 
+    public bool IsMine => Sender == "You";
     public string TimeText => TimestampUtc.ToLocalTime().ToString("t");
     public bool IsAttachment => Kind == ConversationMessageKind.Attachment;
     public bool ShowText => !IsAttachment && !string.IsNullOrWhiteSpace(Text);
@@ -102,6 +105,9 @@ public sealed class ConversationViewModel : IAsyncDisposable
     private readonly SynchronizationContext _uiContext;
     private readonly string _incomingDirectory;
     private readonly string _transcriptDirectory;
+    private readonly InboxStore _inbox;
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<long>> _inboxResume = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> _inboxSending = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _historyGate = new();
     private System.Windows.Threading.DispatcherTimer? _saveTimer;
     private readonly Dictionary<string, IncomingFile> _incoming = new(StringComparer.OrdinalIgnoreCase);
@@ -110,17 +116,18 @@ public sealed class ConversationViewModel : IAsyncDisposable
     private string _transcriptKey = string.Empty;
     private string _sessionKey = string.Empty;
     private readonly HashSet<string> _stopped = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _browseTransfers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _clipTransfers = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _clipGate = new();
     private readonly List<string> _explorerPaths = new();
     private readonly List<ClipOffer> _explorerOffers = new();
     private readonly List<ClipOffer> _remoteOffers = new();
     private readonly List<string> _hostClipFiles = new();
     private string? _downloadDirectory;
-    private ChunkStream? _pasteStream;
-    private string? _pasteId;
-    private string _pasteProgress = string.Empty;
-    private string _pasteName = string.Empty;
-    private long _pasteSize;
+    private readonly List<PasteJob> _pastes = new();
+    private readonly Channel<(WirePacket Packet, IWireSession Source)> _packetQueue =
+        Channel.CreateUnbounded<(WirePacket, IWireSession)>(new UnboundedChannelOptions { SingleReader = true });
+    private bool _explorerOffer;
     private string _clipSignature = string.Empty;
     private int _clipUsers;
     private System.Windows.Threading.DispatcherTimer? _clipTimer;
@@ -132,17 +139,31 @@ public sealed class ConversationViewModel : IAsyncDisposable
     private int _wantLive;
     private int _restoring;
     private readonly SemaphoreSlim _liveGate = new(1, 1);
+    private readonly string? _boundKey;
 
     public ConversationViewModel(string dataDirectory)
+        : this(dataDirectory, new InboxStore(dataDirectory), boundKey: null)
+    {
+    }
+
+    public ConversationViewModel(string dataDirectory, InboxStore inbox, string? boundKey)
     {
         _uiContext = SynchronizationContext.Current ?? new SynchronizationContext();
         _incomingDirectory = Path.Combine(dataDirectory, "Incoming");
         _transcriptDirectory = Path.Combine(dataDirectory, "Chats");
+        _inbox = inbox;
+        _boundKey = string.IsNullOrWhiteSpace(boundKey) ? null : CanonicalKey(boundKey);
         Directory.CreateDirectory(_incomingDirectory);
         Directory.CreateDirectory(_transcriptDirectory);
-        LoadAll();
+        Directory.CreateDirectory(InboxFolder);
+        if (_boundKey != null)
+        {
+            LoadAll();
+            _transcriptKey = _boundKey;
+        }
         Transcript = string.IsNullOrWhiteSpace(_transcriptKey) ? new ObservableCollection<ConversationMessage>() : Bucket(_transcriptKey);
         State = ConversationState.Disconnected;
+        _ = DrainPacketsAsync();
         _saveTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _saveTimer.Tick += (_, _) =>
         {
@@ -162,15 +183,34 @@ public sealed class ConversationViewModel : IAsyncDisposable
     public string RemoteDeskId { get; private set; } = string.Empty;
     public string RemoteAddress { get; private set; } = string.Empty;
     public string Status { get; private set; } = "Disconnected";
-    public bool IsLive => _session is { IsConnected: true };
+    public string PeerKey => _boundKey ?? CanonicalKey(_sessionKey.Length > 0 ? _sessionKey : _transcriptKey);
+    private IWireSession? LiveSession =>
+        _session is { IsConnected: true } ? _session
+        : _peer is { IsConnected: true } ? _peer
+        : _session ?? _peer;
+
+    public bool IsLive => LiveSession is { IsConnected: true };
     public Func<CancellationToken, Task>? RestoreSession { get; set; }
+    public InboxStore Inbox => _inbox;
     public event Action? Changed;
     public event Action<string>? ChatTouched;
     public string? LastIncomingKey { get; private set; }
     public IEnumerable<string> ChatKeys => _transcripts.Keys.ToList();
     public event Action<byte[], int, int>? RemoteFrameReceived;
+    public event Action<byte[]>? RemoteDeltaReceived;
+    public event Action<byte[], int, int>? RemoteH264Received;
+    public event Action<byte[], int, int, int, int>? RemoteRegionReceived;
+    public event Action<int, int, bool, int, int, byte[]?>? RemoteCursorReceived;
     public event Action<string>? ShowPanel;
     public event Action? ViewEnded;
+    public event Action? FilesClosed;
+    public event Action? AccessChanged;
+    public event Action<PermissionRequest>? PermissionAsked;
+    public bool IsHostingScreen { get; private set; }
+    public bool IsHostingFiles { get; private set; }
+    public bool PeerFilesOpen { get; private set; }
+    public bool ClipboardAllowed { get; private set; } = true;
+    private bool _peerClipboard = true;
     private int _viewing;
 
     public void Activate(string key)
@@ -222,12 +262,30 @@ public sealed class ConversationViewModel : IAsyncDisposable
 
     public async Task AcceptSessionAsync(IWireSession session, string address)
     {
+        if (ReferenceEquals(_session, session) || ReferenceEquals(_peer, session))
+            return;
+        if (IsLive)
+        {
+            AttachPeer(session);
+            RememberPeerDesk(session);
+            return;
+        }
+
         await DisconnectAsync().ConfigureAwait(false);
         Attach(session, address);
+        RememberPeerDesk(session);
     }
 
     public async Task RequestPermissionAsync(string kind, CancellationToken cancellationToken = default)
     {
+        if (kind == "files" && PeerFilesOpen)
+        {
+            Post(() => ShowPanel?.Invoke("files"));
+            await BrowseRemoteAsync("", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (Requests.Any(item => item.Kind == kind && item.IsPending && item.ReplySession == null))
+            return;
         if (!await PrepareSendAsync(cancellationToken).ConfigureAwait(false))
             return;
         string id = Guid.NewGuid().ToString("N");
@@ -255,7 +313,11 @@ public sealed class ConversationViewModel : IAsyncDisposable
         if (!await PrepareSendAsync(cancellationToken).ConfigureAwait(false))
             return;
         request.Result = allow ? "Allowed" : "Declined";
-        Post(NotifyChanged);
+        Post(() =>
+        {
+            NotifyChanged();
+            AccessChanged?.Invoke();
+        });
         IWireSession? reply = request.ReplySession ?? _session;
         if (reply == null)
             return;
@@ -263,7 +325,19 @@ public sealed class ConversationViewModel : IAsyncDisposable
         if (allow && request.Kind == "watch")
             await StartShareOnAsync(reply, cancellationToken).ConfigureAwait(false);
         if (allow && request.Kind == "share")
+        {
+            if (!IsLoopbackSession)
+                await StopCaptureQuietAsync().ConfigureAwait(false);
             OpenViewer();
+        }
+        if (request.Kind == "files")
+        {
+            SetHostingFiles(allow);
+            if (!allow && reply.IsConnected)
+                await reply.SendAsync(WirePacket.Text("files:closed"), cancellationToken).ConfigureAwait(false);
+        }
+        if (!allow && request.Kind == "watch")
+            await StopScreenShareAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task BrowseRemoteAsync(string path = "", CancellationToken cancellationToken = default)
@@ -271,9 +345,10 @@ public sealed class ConversationViewModel : IAsyncDisposable
         if (!await PrepareSendAsync(cancellationToken).ConfigureAwait(false))
             return;
         RemoteFolder = path ?? string.Empty;
-        if (_session == null)
+        IWireSession? session = LiveSession;
+        if (session == null)
             return;
-        await _session.SendAsync(WirePacket.Text($"files:getdrives:{Environment.MachineName}", path ?? string.Empty), cancellationToken).ConfigureAwait(false);
+        await session.SendAsync(WirePacket.Text($"files:getdrives:{Environment.MachineName}", path ?? string.Empty), cancellationToken).ConfigureAwait(false);
     }
 
     private void HandlePermissionPacket(WirePacket packet, IWireSession source)
@@ -283,18 +358,26 @@ public sealed class ConversationViewModel : IAsyncDisposable
             string[] parts = packet.Instruction.Split(':');
             if (parts.Length >= 3)
             {
-                PermissionRequest request = new() { Id = parts[1], Kind = parts[2], ReplySession = source };
+                string kind = parts[2];
+                if (kind.Equals("files", StringComparison.OrdinalIgnoreCase) && IsHostingFiles)
+                {
+                    _ = source.SendAsync(WirePacket.Text($"{Protocol.PermitAnswer}:{parts[1]}:allow"));
+                    return;
+                }
+                PermissionRequest request = new() { Id = parts[1], Kind = kind, ReplySession = source };
                 Post(() =>
                 {
                     Requests.Add(request);
                     Append(new ConversationMessage
                     {
                         Sender = RemoteAddress,
-                        Text = request.Description,
-                        Kind = ConversationMessageKind.Request,
+                        Text = request.Description + " — answer in the access window.",
+                        Kind = ConversationMessageKind.System,
                         FileId = request.Id
                     });
                     NotifyChanged();
+                    PermissionAsked?.Invoke(request);
+                    AccessChanged?.Invoke();
                 });
             }
             return;
@@ -308,19 +391,31 @@ public sealed class ConversationViewModel : IAsyncDisposable
                 string result = parts[2].Equals("allow", StringComparison.OrdinalIgnoreCase) ? "Allowed" : "Declined";
                 Post(() =>
                 {
-                    PermissionRequest? request = Requests.FirstOrDefault(item => item.Id == id);
-                    if (request != null) request.Result = result;
+                    PermissionRequest? request = null;
+                    foreach (PermissionRequest item in Requests.Where(entry => entry.Id == id && entry.IsPending))
+                    {
+                        item.Result = result;
+                        request ??= item;
+                    }
                     Append(new ConversationMessage { Sender = RemoteAddress, Text = result, Kind = ConversationMessageKind.System });
                     NotifyChanged();
                     if (request != null && result == "Allowed" && request.Kind == "share")
                         _ = StartScreenShareAsync();
                     if (request != null && result == "Allowed" && request.Kind == "files")
                     {
+                        PeerFilesOpen = true;
                         ShowPanel?.Invoke("files");
                         _ = BrowseRemoteAsync();
                     }
+                    if (request != null && result == "Declined" && request.Kind == "files")
+                        PeerFilesOpen = false;
                     if (request != null && result == "Allowed" && request.Kind == "watch")
+                    {
+                        if (!IsLoopbackSession)
+                            _ = StopCaptureQuietAsync();
                         OpenViewer();
+                    }
+                    AccessChanged?.Invoke();
                 });
             }
         }
@@ -427,6 +522,7 @@ public sealed class ConversationViewModel : IAsyncDisposable
         _session = session;
         _screenShare = new ScreenShareService(session);
         RemoteAddress = address;
+        RemoteDeskId = CanonicalKey(address);
         Volatile.Write(ref _wantLive, 1);
         _sessionKey = CanonicalKey(address);
         if (string.IsNullOrWhiteSpace(_transcriptKey))
@@ -434,7 +530,16 @@ public sealed class ConversationViewModel : IAsyncDisposable
         session.PacketReceived += packet => DispatchPacket(packet, session);
         session.StatusChanged += status => SessionStatusChanged(session, status);
         session.ProtocolMismatch += SessionProtocolMismatch;
+        RememberPeerDesk(session);
         UpdateState(ConversationState.Connected, "Connected");
+        _ = ResumeInboxJobsAsync();
+    }
+
+    private void RememberPeerDesk(IWireSession session)
+    {
+        string desk = CanonicalKey(session.PeerDeskId);
+        if (desk.Length == 10)
+            RemoteDeskId = desk;
     }
 
     public void RequestLive() => Volatile.Write(ref _wantLive, 1);
@@ -500,13 +605,14 @@ public sealed class ConversationViewModel : IAsyncDisposable
 
     private async Task StartShareOnAsync(IWireSession session, CancellationToken cancellationToken)
     {
+        if (!IsLoopbackSession)
+            EndViewing();
         if (session == _peer)
         {
-            if (_peerShare?.IsSharing == true)
-                return;
             BeginClipboardSync();
             if (_peerShare != null)
                 await _peerShare.StartAsync(cancellationToken).ConfigureAwait(false);
+            SetHostingScreen(true);
             return;
         }
         await StartScreenShareAsync(cancellationToken).ConfigureAwait(false);
@@ -515,16 +621,33 @@ public sealed class ConversationViewModel : IAsyncDisposable
     private void DispatchPacket(WirePacket packet, IWireSession source)
     {
         if (packet.Instruction.StartsWith("remote:frame:", StringComparison.OrdinalIgnoreCase)
+            || packet.Instruction.StartsWith("remote:delta", StringComparison.OrdinalIgnoreCase)
+            || packet.Instruction.StartsWith("remote:h264:", StringComparison.OrdinalIgnoreCase)
+            || packet.Instruction.StartsWith("remote:region:", StringComparison.OrdinalIgnoreCase)
+            || packet.Instruction.StartsWith("remote:cursor:", StringComparison.OrdinalIgnoreCase)
+            || packet.Instruction.StartsWith("remote:mark:", StringComparison.OrdinalIgnoreCase)
+            || packet.Instruction.StartsWith("remote:ack:", StringComparison.OrdinalIgnoreCase)
             || packet.Instruction.StartsWith("remote:input", StringComparison.OrdinalIgnoreCase))
         {
             OnPacket(packet, source);
             return;
         }
-        ThreadPool.QueueUserWorkItem(_ =>
+        _packetQueue.Writer.TryWrite((packet, source));
+    }
+
+    private async Task DrainPacketsAsync()
+    {
+        try
         {
-            try { OnPacket(packet, source); }
-            catch { }
-        });
+            await foreach ((WirePacket packet, IWireSession source) in _packetQueue.Reader.ReadAllAsync().ConfigureAwait(false))
+            {
+                try { OnPacket(packet, source); }
+                catch { }
+            }
+        }
+        catch (ChannelClosedException)
+        {
+        }
     }
 
     private void OnPacket(WirePacket packet, IWireSession source)
@@ -539,6 +662,70 @@ public sealed class ConversationViewModel : IAsyncDisposable
             RemoteWidth = width;
             RemoteHeight = height;
             RemoteFrameReceived?.Invoke(packet.Data, width, height);
+            return;
+        }
+
+        if (packet.Instruction.StartsWith("remote:delta", StringComparison.OrdinalIgnoreCase))
+        {
+            if (Volatile.Read(ref _viewing) == 0 || packet.Data == null || packet.Data.Length == 0)
+                return;
+            RemoteDeltaReceived?.Invoke(packet.Data);
+            return;
+        }
+
+        if (packet.Instruction.StartsWith("remote:h264:", StringComparison.OrdinalIgnoreCase))
+        {
+            if (Volatile.Read(ref _viewing) == 0 || packet.Data == null || packet.Data.Length == 0)
+                return;
+            string[] size = packet.Instruction["remote:h264:".Length..].Split(',');
+            int.TryParse(size.ElementAtOrDefault(0), out int width);
+            int.TryParse(size.ElementAtOrDefault(1), out int height);
+            RemoteWidth = width;
+            RemoteHeight = height;
+            RemoteH264Received?.Invoke(packet.Data, width, height);
+            return;
+        }
+
+        if (packet.Instruction.StartsWith("remote:region:", StringComparison.OrdinalIgnoreCase))
+        {
+            if (Volatile.Read(ref _viewing) == 0 || packet.Data == null || packet.Data.Length == 0)
+                return;
+            string[] part = packet.Instruction["remote:region:".Length..].Split(',');
+            int.TryParse(part.ElementAtOrDefault(0), out int x);
+            int.TryParse(part.ElementAtOrDefault(1), out int y);
+            int.TryParse(part.ElementAtOrDefault(2), out int width);
+            int.TryParse(part.ElementAtOrDefault(3), out int height);
+            RemoteRegionReceived?.Invoke(packet.Data, x, y, width, height);
+            return;
+        }
+
+        if (packet.Instruction.StartsWith("remote:cursor:", StringComparison.OrdinalIgnoreCase))
+        {
+            if (Volatile.Read(ref _viewing) == 0)
+                return;
+            string[] part = packet.Instruction["remote:cursor:".Length..].Split(',');
+            int.TryParse(part.ElementAtOrDefault(0), out int x);
+            int.TryParse(part.ElementAtOrDefault(1), out int y);
+            int.TryParse(part.ElementAtOrDefault(2), out int shown);
+            int.TryParse(part.ElementAtOrDefault(3), out int hotX);
+            int.TryParse(part.ElementAtOrDefault(4), out int hotY);
+            RemoteCursorReceived?.Invoke(x, y, shown != 0, hotX, hotY, packet.Data);
+            return;
+        }
+
+        if (packet.Instruction.StartsWith("remote:mark:", StringComparison.OrdinalIgnoreCase))
+        {
+            _ = AckFrameAsync(source, packet.Instruction["remote:mark:".Length..]);
+            return;
+        }
+
+        if (packet.Instruction.StartsWith("remote:ack:", StringComparison.OrdinalIgnoreCase))
+        {
+            if (int.TryParse(packet.Instruction["remote:ack:".Length..], out int seq))
+            {
+                ScreenShareService? share = ReferenceEquals(source, _peer) ? _peerShare : _screenShare;
+                share?.Acknowledge(seq);
+            }
             return;
         }
 
@@ -604,8 +791,18 @@ public sealed class ConversationViewModel : IAsyncDisposable
             return;
         }
 
+        if (packet.Instruction.StartsWith("files:access", StringComparison.OrdinalIgnoreCase)
+            || packet.Instruction.StartsWith("files:closed", StringComparison.OrdinalIgnoreCase))
+        {
+            PeerFilesOpen = false;
+            Post(() => FilesClosed?.Invoke());
+            return;
+        }
+
         if (packet.Instruction.StartsWith("files:getdrives", StringComparison.OrdinalIgnoreCase))
         {
+            if (RefuseFilesIfLocked(source))
+                return;
             string path = System.Text.Encoding.UTF8.GetString(packet.Data ?? Array.Empty<byte>());
             _ = Task.Run(async () =>
             {
@@ -623,11 +820,43 @@ public sealed class ConversationViewModel : IAsyncDisposable
 
         if (packet.Instruction.StartsWith("files:getfile", StringComparison.OrdinalIgnoreCase))
         {
+            if (RefuseFilesIfLocked(source))
+                return;
             string raw = Encoding.UTF8.GetString(packet.Data ?? Array.Empty<byte>());
             int tab = raw.IndexOf('\t');
             string path = tab >= 0 ? raw[..tab] : raw;
             string kind = tab >= 0 && raw[(tab + 1)..].Equals("clip", StringComparison.OrdinalIgnoreCase) ? "ClipFile" : "File";
             _ = SendDiskFileAsync(source, path, kind);
+            return;
+        }
+
+        if (packet.Instruction.StartsWith("remote:cliptext", StringComparison.OrdinalIgnoreCase))
+        {
+            string text = Encoding.UTF8.GetString(packet.Data ?? Array.Empty<byte>());
+            Post(() => ApplyClipText(text));
+            return;
+        }
+
+        if (packet.Instruction.StartsWith("remote:clipflush", StringComparison.OrdinalIgnoreCase))
+        {
+            Post(() => _ = PublishClipboardAsync());
+            return;
+        }
+
+        if (packet.Instruction.StartsWith("remote:clipoff", StringComparison.OrdinalIgnoreCase))
+        {
+            _peerClipboard = false;
+            Post(() =>
+            {
+                if (!ExplorerOfferOnClipboard)
+                    VirtualClipboard.ClearIfOurs();
+            });
+            return;
+        }
+
+        if (packet.Instruction.StartsWith("remote:clipon", StringComparison.OrdinalIgnoreCase))
+        {
+            _peerClipboard = true;
             return;
         }
 
@@ -640,6 +869,11 @@ public sealed class ConversationViewModel : IAsyncDisposable
 
         if (packet.Instruction.StartsWith("remote:clipget", StringComparison.OrdinalIgnoreCase))
         {
+            if (!ClipboardAllowed)
+            {
+                _ = source.SendAsync(WirePacket.Text("remote:clipempty"));
+                return;
+            }
             int.TryParse(Encoding.UTF8.GetString(packet.Data ?? Array.Empty<byte>()), out int index);
             string? path;
             lock (_clipGate)
@@ -653,7 +887,7 @@ public sealed class ConversationViewModel : IAsyncDisposable
 
         if (packet.Instruction.StartsWith("remote:clipempty", StringComparison.OrdinalIgnoreCase))
         {
-            CancelPaste();
+            CancelPastes(explorer: false);
             return;
         }
 
@@ -672,28 +906,52 @@ public sealed class ConversationViewModel : IAsyncDisposable
             if (string.IsNullOrWhiteSpace(id))
                 return;
             Directory.CreateDirectory(InboxFolder);
-            _uploads[id] = new IncomingFile(id, name, length, InboxFolder, keepName: true);
-            Append(new ConversationMessage
+            if (!_uploads.TryGetValue(id, out IncomingFile? inboxFile))
             {
-                Sender = RemoteAddress,
-                Kind = ConversationMessageKind.Attachment,
-                FileId = id,
-                FileName = name,
-                FileLength = length
-            });
-            SetTransfer("Saving " + name + " to Inbox...");
+                inboxFile = new IncomingFile(id, name, length, InboxFolder, keepName: true, inbox: true);
+                _uploads[id] = inboxFile;
+                Append(new ConversationMessage
+                {
+                    Sender = RemoteAddress,
+                    Kind = ConversationMessageKind.Attachment,
+                    FileId = id,
+                    FileName = name,
+                    FileLength = length
+                });
+            }
+            _ = source.SendAsync(WirePacket.Text($"files:resume:{id}", inboxFile.Received.ToString()));
+            SetTransfer(inboxFile.Completed
+                ? "Already in Inbox: " + name
+                : "Saving " + name + " to Inbox...");
+            TransferWindow.Report(id, name, inboxFile.Received, Math.Max(1, length), () => CancelTransfer(id));
+            if (inboxFile.Completed)
+                FinishInboxReceive(inboxFile);
+            return;
+        }
+
+        if (packet.Instruction.StartsWith("files:resume:", StringComparison.OrdinalIgnoreCase))
+        {
+            string id = packet.Instruction.Split(':').ElementAtOrDefault(2) ?? string.Empty;
+            long.TryParse(Encoding.UTF8.GetString(packet.Data ?? Array.Empty<byte>()), out long received);
+            if (_inboxResume.TryGetValue(id, out TaskCompletionSource<long>? waiter))
+                waiter.TrySetResult(Math.Max(0, received));
             return;
         }
 
         if (packet.Instruction.StartsWith("files:put:", StringComparison.OrdinalIgnoreCase))
         {
+            if (RefuseFilesIfLocked(source))
+                return;
             string id = packet.Instruction.Split(':').ElementAtOrDefault(2) ?? string.Empty;
             string[] meta = Encoding.UTF8.GetString(packet.Data ?? Array.Empty<byte>()).Split('\t');
             string folder = meta.ElementAtOrDefault(0) ?? string.Empty;
             string name = meta.ElementAtOrDefault(1) ?? "file";
             long.TryParse(meta.ElementAtOrDefault(2), out long length);
             if (!string.IsNullOrWhiteSpace(id) && Directory.Exists(folder))
+            {
+                TrackBrowseTransfer(id);
                 _uploads[id] = new IncomingFile(id, name, length, folder, keepName: true);
+            }
             return;
         }
 
@@ -705,7 +963,8 @@ public sealed class ConversationViewModel : IAsyncDisposable
 
         if (packet.Instruction.StartsWith("remote:input", StringComparison.OrdinalIgnoreCase))
         {
-            RemoteControl.Apply(Encoding.UTF8.GetString(packet.Data ?? Array.Empty<byte>()));
+            if (IsHostingScreen)
+                RemoteControl.Apply(Encoding.UTF8.GetString(packet.Data ?? Array.Empty<byte>()), ReferenceEquals(source, _peer) ? _peerShare : _screenShare);
             return;
         }
 
@@ -778,27 +1037,192 @@ public sealed class ConversationViewModel : IAsyncDisposable
         return new StringBuilder().Append(folders).Append(section).Append(section).Append(section).Append(section).Append(files).ToString();
     }
 
-    public Task StartScreenShareAsync(CancellationToken cancellationToken = default)
+    private bool IsLoopbackSession
     {
-        if (_screenShare?.IsSharing == true)
-            return Task.CompletedTask;
+        get
+        {
+            string address = RemoteAddress ?? string.Empty;
+            return Volatile.Read(ref _expectSelfPeer) == 1
+                || address.StartsWith("127.0.0.1", StringComparison.OrdinalIgnoreCase)
+                || address.StartsWith("localhost", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    public async Task StartScreenShareAsync(CancellationToken cancellationToken = default)
+    {
+        if (!IsLoopbackSession)
+            EndViewing();
         BeginClipboardSync();
-        return _screenShare?.StartAsync(cancellationToken) ?? Task.CompletedTask;
+        SetHostingScreen(true);
+        if (_screenShare != null)
+            await _screenShare.StartAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task StopScreenShareAsync(CancellationToken cancellationToken = default)
     {
-        Volatile.Write(ref _viewing, 0);
-        bool sharing = (_screenShare?.IsSharing ?? false) || (_peerShare?.IsSharing ?? false);
+        EndViewing();
         if (_screenShare != null)
             await _screenShare.StopAsync(cancellationToken).ConfigureAwait(false);
         if (_peerShare != null)
             await _peerShare.StopAsync(cancellationToken).ConfigureAwait(false);
-        if (!sharing && _session is { IsConnected: true })
+        if (_session is { IsConnected: true })
             await _session.SendAsync(WirePacket.Text("remote:stop"), cancellationToken).ConfigureAwait(false);
-        if (sharing)
-            EndClipboardSync();
+        SetHostingScreen(false);
+    }
+
+    private async Task StopCaptureQuietAsync()
+    {
+        if (_screenShare != null)
+            await _screenShare.StopQuietAsync().ConfigureAwait(false);
+        if (_peerShare != null)
+            await _peerShare.StopQuietAsync().ConfigureAwait(false);
+        SetHostingScreen(false);
+    }
+
+    private void EndViewing()
+    {
+        if (Interlocked.Exchange(ref _viewing, 0) == 0)
+            return;
         Post(() => ViewEnded?.Invoke());
+    }
+
+    public async Task RevokeScreenAsync(CancellationToken cancellationToken = default)
+    {
+        await StopScreenShareAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task RevokeFilesAsync(CancellationToken cancellationToken = default)
+    {
+        SetHostingFiles(false);
+        if (_session is { IsConnected: true })
+            await _session.SendAsync(WirePacket.Text("files:closed"), cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task NotifyFilesWindowClosedAsync()
+    {
+        PeerFilesOpen = false;
+        if (IsHostingFiles)
+            return Task.CompletedTask;
+        return _session is { IsConnected: true }
+            ? _session.SendAsync(WirePacket.Text("files:closed"))
+            : Task.CompletedTask;
+    }
+
+    public async Task SetClipboardAllowedAsync(bool allowed, CancellationToken cancellationToken = default)
+    {
+        ClipboardAllowed = allowed;
+        Post(() => AccessChanged?.Invoke());
+        IWireSession? session = LiveSession;
+        if (session is not { IsConnected: true })
+            return;
+        await session.SendAsync(WirePacket.Text(allowed ? "remote:clipon" : "remote:clipoff"), cancellationToken).ConfigureAwait(false);
+        if (!allowed)
+            Post(() => VirtualClipboard.ClearIfOurs());
+        else
+            await FlushClipboardAsync().ConfigureAwait(false);
+    }
+
+    private void SetHostingScreen(bool value)
+    {
+        if (!value)
+            AbortRemoteSession();
+        if (IsHostingScreen == value)
+        {
+            if (!value)
+                Post(() => AccessChanged?.Invoke());
+            return;
+        }
+        IsHostingScreen = value;
+        Post(() => AccessChanged?.Invoke());
+    }
+
+    private void AbortRemoteSession()
+    {
+        ClearPendingKind("watch");
+        ClearPendingKind("share");
+        EndClipboardSync();
+        CancelPastes(explorer: false);
+        lock (_clipGate)
+            _hostClipFiles.Clear();
+        string[] ids;
+        lock (_clipTransfers)
+            ids = _clipTransfers.ToArray();
+        foreach (string id in ids)
+            CancelTransfer(id);
+        Post(() => VirtualClipboard.ClearIfOurs());
+        if (ids.Length > 0)
+            SetTransfer("Screen sharing stopped. Transfer cancelled.");
+    }
+
+    private void SetHostingFiles(bool value)
+    {
+        bool cleared = false;
+        if (!value)
+        {
+            cleared = ClearPendingKind("files");
+            AbortBrowseTransfers();
+        }
+        if (IsHostingFiles == value)
+        {
+            if (cleared)
+                Post(() => AccessChanged?.Invoke());
+            return;
+        }
+        IsHostingFiles = value;
+        Post(() => AccessChanged?.Invoke());
+    }
+
+    private void AbortBrowseTransfers()
+    {
+        CancelPastes(explorer: true);
+        string[] ids;
+        lock (_browseTransfers)
+            ids = _browseTransfers.ToArray();
+        bool any = ids.Length > 0;
+        foreach (string id in ids)
+            CancelTransfer(id);
+        foreach (string id in _uploads.Keys.Where(key => _uploads[key] is { Inbox: false }).ToList())
+        {
+            if (_uploads.Remove(id, out IncomingFile? file))
+                file.Abort();
+            CancelTransfer(id);
+            any = true;
+        }
+        foreach (string id in _incoming.Keys.ToList())
+        {
+            if (!_incoming.TryGetValue(id, out IncomingFile? file))
+                continue;
+            bool chat = file.Path.StartsWith(_incomingDirectory, StringComparison.OrdinalIgnoreCase);
+            if (chat)
+                continue;
+            file.Abort();
+            _incoming.Remove(id);
+            CancelTransfer(id);
+            any = true;
+        }
+        if (any)
+            SetTransfer("File access stopped. Transfer cancelled.");
+    }
+
+    private void TrackBrowseTransfer(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return;
+        lock (_browseTransfers)
+            _browseTransfers.Add(id);
+    }
+
+    private bool ClearPendingKind(string kind)
+    {
+        bool cleared = false;
+        foreach (PermissionRequest request in Requests)
+        {
+            if (!request.Kind.Equals(kind, StringComparison.OrdinalIgnoreCase) || !request.IsPending)
+                continue;
+            request.Result = "Closed";
+            cleared = true;
+        }
+        return cleared;
     }
 
     private void OpenViewer()
@@ -809,21 +1233,19 @@ public sealed class ConversationViewModel : IAsyncDisposable
 
     private async Task StopFromPeerAsync()
     {
-        Volatile.Write(ref _viewing, 0);
-        bool sharing = (_screenShare?.IsSharing ?? false) || (_peerShare?.IsSharing ?? false);
-        if (_screenShare != null)
-            await _screenShare.StopQuietAsync().ConfigureAwait(false);
-        if (_peerShare != null)
-            await _peerShare.StopQuietAsync().ConfigureAwait(false);
-        if (sharing)
-            EndClipboardSync();
+        EndViewing();
+        await StopCaptureQuietAsync().ConfigureAwait(false);
         Append(new ConversationMessage { Sender = RemoteAddress, Text = "Screen sharing stopped.", Kind = ConversationMessageKind.System });
-        Post(() => ViewEnded?.Invoke());
     }
 
     public void CancelTransfer(string id)
     {
         _stopped.Add(id);
+        lock (_browseTransfers)
+            _browseTransfers.Remove(id);
+        lock (_clipTransfers)
+            _clipTransfers.Remove(id);
+        _inbox.RemoveJob(id);
         _ = _session?.SendAsync(WirePacket.Text("transfer:cancel", id));
         TransferWindow.Finish(id);
     }
@@ -841,6 +1263,7 @@ public sealed class ConversationViewModel : IAsyncDisposable
             _explorerOffers.Add(new ClipOffer(file.Name, file.Size));
         }
         List<ClipOffer> offers = _explorerOffers.ToList();
+        _explorerOffer = true;
         Post(() => VirtualClipboard.Offer(offers, BeginExplorerPaste));
         SetTransfer("Copied. Paste in File Explorer on this PC to start the transfer.");
     }
@@ -850,10 +1273,12 @@ public sealed class ConversationViewModel : IAsyncDisposable
         Post(() =>
         {
             _clipUsers++;
-            _clipTimer ??= new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(2500) };
+            _clipTimer ??= new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+            _clipTimer.Interval = TimeSpan.FromMilliseconds(400);
             _clipTimer.Tick -= ClipTick;
             _clipTimer.Tick += ClipTick;
             _clipTimer.Start();
+            _ = PublishClipboardAsync();
         });
     }
 
@@ -894,13 +1319,26 @@ public sealed class ConversationViewModel : IAsyncDisposable
 
     private async Task SendCommandAsync(string instruction, string data, CancellationToken cancellationToken)
     {
-        if (!await PrepareSendAsync(cancellationToken).ConfigureAwait(false) || _session == null)
+        if (!await PrepareSendAsync(cancellationToken).ConfigureAwait(false))
             return;
-        await _session.SendAsync(WirePacket.Text(instruction, data), cancellationToken).ConfigureAwait(false);
+        IWireSession? session = LiveSession;
+        if (session == null)
+            return;
+        await session.SendAsync(WirePacket.Text(instruction, data), cancellationToken).ConfigureAwait(false);
+    }
+
+    private bool RefuseFilesIfLocked(IWireSession source)
+    {
+        if (IsHostingFiles)
+            return false;
+        _ = source.SendAsync(WirePacket.Text("files:access", "</Denied/>"));
+        return true;
     }
 
     private void ApplyFileCommand(IWireSession source, WirePacket packet)
     {
+        if (RefuseFilesIfLocked(source))
+            return;
         string data = Encoding.UTF8.GetString(packet.Data ?? Array.Empty<byte>());
         string instruction = packet.Instruction;
         string refresh = RemoteFolder;
@@ -961,41 +1399,135 @@ public sealed class ConversationViewModel : IAsyncDisposable
             return;
         Directory.CreateDirectory(localDirectory);
         _downloadDirectory = localDirectory;
-        if (_session == null)
+        IWireSession? session = LiveSession;
+        if (session == null)
             return;
         SetTransfer("Copying " + Path.GetFileName(remotePath) + " to this PC...");
-        await _session.SendAsync(WirePacket.Text($"files:getfile:{Environment.MachineName}", remotePath), cancellationToken).ConfigureAwait(false);
+        await session.SendAsync(WirePacket.Text($"files:getfile:{Environment.MachineName}", remotePath), cancellationToken).ConfigureAwait(false);
     }
 
     public static string InboxFolder =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Kdock Inbox");
 
-    public async Task SendToInboxAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default)
+    public async Task SendToInboxAsync(string peerId, IEnumerable<string> paths, CancellationToken cancellationToken = default)
     {
-        if (!await PrepareSendAsync(cancellationToken).ConfigureAwait(false) || _session == null)
-            return;
+        string peer = CanonicalKey(peerId);
+        if (string.IsNullOrWhiteSpace(peer))
+            peer = string.IsNullOrWhiteSpace(RemoteDeskId) ? CanonicalKey(RemoteAddress) : RemoteDeskId;
         foreach (string path in paths)
         {
             if (!File.Exists(path))
                 continue;
-            string id = Guid.NewGuid().ToString("N");
-            string name = Path.GetFileName(path);
-            long length = new FileInfo(path).Length;
-            ConversationMessage message = new()
+            InboxJob job = _inbox.AddJob(peer, path);
+            await SendInboxJobAsync(job, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task ResumeInboxJobsAsync()
+    {
+        string peer = CanonicalKey(string.IsNullOrWhiteSpace(RemoteDeskId) ? RemoteAddress : RemoteDeskId);
+        if (peer.Length == 0)
+            peer = PeerKey;
+        foreach (InboxJob job in _inbox.Jobs)
+        {
+            string jobPeer = CanonicalKey(job.PeerId);
+            if (jobPeer.Length == 0
+                || (!jobPeer.Equals(peer, StringComparison.OrdinalIgnoreCase) && DigitsOnly(jobPeer) != DigitsOnly(peer)))
+                continue;
+            _ = SendInboxJobAsync(job, CancellationToken.None);
+        }
+    }
+
+    private async Task SendInboxJobAsync(InboxJob job, CancellationToken cancellationToken)
+    {
+        if (!_inboxSending.TryAdd(job.Id, 1))
+            return;
+        try
+        {
+            if (!File.Exists(job.Path) || _stopped.Contains(job.Id))
             {
-                Sender = "You",
-                Kind = ConversationMessageKind.Attachment,
-                FileId = id,
-                FileName = name,
-                FileLength = length,
-                SavedPath = path
-            };
-            Append(message);
-            SetTransfer("Sending " + name + " to their Inbox...");
-            await _session.SendAsync(WirePacket.Text($"files:inbox:{id}", $"{name}\t{length}"), cancellationToken).ConfigureAwait(false);
-            await SendChunksAsync(_session, "Put", id, name, length, path, cancellationToken).ConfigureAwait(false);
-            Post(() => message.FileProgress = length);
-            SetTransfer("Sent " + name + " to their Inbox.");
+                _inbox.RemoveJob(job.Id);
+                TransferWindow.Finish(job.Id);
+                return;
+            }
+
+            TransferWindow.Report(job.Id, job.Name, job.Offset, Math.Max(1, job.Length), () => CancelTransfer(job.Id));
+            if (!await PrepareSendAsync(cancellationToken).ConfigureAwait(false) || _session == null)
+            {
+                SetTransfer("Paused — reconnecting " + job.Name);
+                return;
+            }
+
+            if (job.Offset == 0)
+            {
+                Append(new ConversationMessage
+                {
+                    Sender = "You",
+                    Kind = ConversationMessageKind.Attachment,
+                    FileId = job.Id,
+                    FileName = job.Name,
+                    FileLength = job.Length,
+                    SavedPath = job.Path
+                });
+            }
+            SetTransfer("Sending " + job.Name + " to their Inbox...");
+            TaskCompletionSource<long> resume = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            _inboxResume[job.Id] = resume;
+            await _session.SendAsync(WirePacket.Text($"files:inbox:{job.Id}", $"{job.Name}\t{job.Length}"), cancellationToken).ConfigureAwait(false);
+            long have = job.Offset;
+            try
+            {
+                have = await resume.Task.WaitAsync(TimeSpan.FromSeconds(12), cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            _inboxResume.TryRemove(job.Id, out _);
+            if (have >= job.Length)
+            {
+                _inbox.RemoveJob(job.Id);
+                Post(() => UpdateFileProgress(job.Id, job.Length, job.Path));
+                TransferWindow.Finish(job.Id);
+                SetTransfer("Already on their Inbox: " + job.Name);
+                return;
+            }
+
+            _inbox.UpdateJob(job.Id, have);
+            await SendChunksAsync(_session, "Put", job.Id, job.Name, job.Length, job.Path, cancellationToken, have, offset =>
+            {
+                _inbox.UpdateJob(job.Id, offset);
+                Post(() => UpdateFileProgress(job.Id, offset, job.Path));
+            }).ConfigureAwait(false);
+            _inbox.RemoveJob(job.Id);
+            Post(() => UpdateFileProgress(job.Id, job.Length, job.Path));
+            SetTransfer("Sent " + job.Name + " to their Inbox.");
+        }
+        catch (OperationCanceledException)
+        {
+            SetTransfer("Paused — " + job.Name);
+        }
+        catch (IOException)
+        {
+            SetTransfer("Paused — reconnecting " + job.Name);
+            TransferWindow.Report(job.Id, job.Name, job.Offset, Math.Max(1, job.Length), () => CancelTransfer(job.Id));
+        }
+        catch (ObjectDisposedException)
+        {
+            SetTransfer("Paused — reconnecting " + job.Name);
+        }
+        catch (Exception)
+        {
+            SetTransfer("Paused — reconnecting " + job.Name);
+            TransferWindow.Report(job.Id, job.Name, job.Offset, Math.Max(1, job.Length), () => CancelTransfer(job.Id));
+        }
+        finally
+        {
+            _inboxSending.TryRemove(job.Id, out _);
+            _inboxResume.TryRemove(job.Id, out _);
         }
     }
 
@@ -1006,21 +1538,38 @@ public sealed class ConversationViewModel : IAsyncDisposable
         string id = Guid.NewGuid().ToString("N");
         string name = Path.GetFileName(localPath);
         long length = new FileInfo(localPath).Length;
-        if (_session == null)
+        IWireSession? session = LiveSession;
+        if (session == null)
             return;
         SetTransfer("Copying " + name + " to their PC...");
-        await _session.SendAsync(WirePacket.Text($"files:put:{id}", $"{remoteFolder}\t{name}\t{length}"), cancellationToken).ConfigureAwait(false);
-        await SendChunksAsync(_session, "Put", id, name, length, localPath, cancellationToken).ConfigureAwait(false);
+        TrackBrowseTransfer(id);
+        await session.SendAsync(WirePacket.Text($"files:put:{id}", $"{remoteFolder}\t{name}\t{length}"), cancellationToken).ConfigureAwait(false);
+        await SendChunksAsync(session, "Put", id, name, length, localPath, cancellationToken).ConfigureAwait(false);
         SetTransfer("Copied " + name + " to their PC.");
+    }
+
+    private static async Task AckFrameAsync(IWireSession source, string seq)
+    {
+        try
+        {
+            if (source.IsConnected)
+                await source.SendAsync(WirePacket.Text("remote:ack:" + seq)).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+        }
     }
 
     public async Task SendControlAsync(string payload, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrEmpty(payload) || !await PrepareSendAsync(cancellationToken).ConfigureAwait(false))
+        if (string.IsNullOrEmpty(payload) || Volatile.Read(ref _viewing) == 0)
             return;
-        if (_session == null)
+        if (!await PrepareSendAsync(cancellationToken).ConfigureAwait(false))
             return;
-        await _session.SendAsync(WirePacket.Text("remote:input", payload), cancellationToken).ConfigureAwait(false);
+        IWireSession? session = LiveSession;
+        if (session == null || !session.IsConnected)
+            return;
+        await session.SendAsync(WirePacket.Text("remote:input", payload), cancellationToken).ConfigureAwait(false);
     }
 
     private async Task SendDiskFileAsync(IWireSession session, string path, string kind)
@@ -1030,16 +1579,34 @@ public sealed class ConversationViewModel : IAsyncDisposable
         string id = Guid.NewGuid().ToString("N");
         string name = Path.GetFileName(path);
         long length = new FileInfo(path).Length;
+        if (kind.Equals("ClipFile", StringComparison.OrdinalIgnoreCase))
+        {
+            lock (_clipTransfers)
+                _clipTransfers.Add(id);
+        }
+        else
+            TrackBrowseTransfer(id);
         await SendChunksAsync(session, kind, id, name, length, path, CancellationToken.None).ConfigureAwait(false);
     }
 
-    private async Task SendChunksAsync(IWireSession session, string kind, string id, string name, long length, string path, CancellationToken cancellationToken)
+    private async Task SendChunksAsync(
+        IWireSession session,
+        string kind,
+        string id,
+        string name,
+        long length,
+        string path,
+        CancellationToken cancellationToken,
+        long offset = 0,
+        Action<long>? progress = null)
     {
         byte[] buffer = new byte[64 * 1024];
         await using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        if (offset > 0)
+            stream.Seek(Math.Min(offset, stream.Length), SeekOrigin.Begin);
         int read;
-        long sent = 0;
-        TransferWindow.Report(id, name, 0, Math.Max(1, length), () => CancelTransfer(id));
+        long sent = Math.Max(0, offset);
+        TransferWindow.Report(id, name, sent, Math.Max(1, length), () => CancelTransfer(id));
         while ((read = await stream.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) > 0)
         {
             if (_stopped.Contains(id))
@@ -1048,12 +1615,13 @@ public sealed class ConversationViewModel : IAsyncDisposable
                 return;
             }
             byte[] chunk = buffer[..read].ToArray();
-            await session.SendAsync(WirePacket.Binary($"{kind}:{id}:{name}:{length}", chunk), cancellationToken).ConfigureAwait(false);
+            await session.SendAsync(WirePacket.Binary($"{kind}:{id}:{name}:{length}:{sent}", chunk), cancellationToken).ConfigureAwait(false);
             sent += read;
+            progress?.Invoke(sent);
             TransferWindow.Report(id, name, sent, Math.Max(1, length), () => CancelTransfer(id));
         }
         if (length == 0)
-            await session.SendAsync(WirePacket.Binary($"{kind}:{id}:{name}:{length}", Array.Empty<byte>()), cancellationToken).ConfigureAwait(false);
+            await session.SendAsync(WirePacket.Binary($"{kind}:{id}:{name}:{length}:0", Array.Empty<byte>()), cancellationToken).ConfigureAwait(false);
         TransferWindow.Finish(id);
     }
 
@@ -1062,25 +1630,64 @@ public sealed class ConversationViewModel : IAsyncDisposable
         string[] parts = packet.Instruction.Split(':');
         if (parts.Length < 2 || !_uploads.TryGetValue(parts[1], out IncomingFile? file))
             return;
-        file.Write(packet.Data);
-        if (file.Completed)
+        if (_stopped.Contains(file.Id) || (!file.Inbox && !IsHostingFiles))
         {
-            _uploads.Remove(parts[1]);
-            SetTransfer("Received " + file.Name);
-            Post(() =>
-            {
-                ConversationMessage? message = Bucket(_sessionKey.Length > 0 ? _sessionKey : _transcriptKey)
-                    .FirstOrDefault(item => item.FileId == file.Id);
-                if (message != null)
-                {
-                    message.FileProgress = file.Length;
-                    message.SavedPath = file.Path;
-                }
-                NotifyChanged();
-            });
-            if (!string.IsNullOrWhiteSpace(RemoteFolder))
-                _ = SendListingAsync(file);
+            file.Abort();
+            _uploads.Remove(file.Id);
+            TransferWindow.Finish(file.Id);
+            return;
         }
+        if (TryWireFile(packet.Instruction, out _, out _, out _, out long at))
+            file.Seek(at);
+        else if (parts.Length >= 5 && long.TryParse(parts[4], out at))
+            file.Seek(at);
+        file.Write(packet.Data);
+        TransferWindow.Report(file.Id, file.Name, file.Received, Math.Max(1, file.Length), () => CancelTransfer(file.Id));
+        if (file.Completed)
+            FinishInboxReceive(file);
+    }
+
+    private void FinishInboxReceive(IncomingFile file)
+    {
+        if (!_uploads.Remove(file.Id))
+            return;
+        file.Complete();
+        SetTransfer("Received " + file.Name);
+        TransferWindow.Finish(file.Id);
+        Post(() =>
+        {
+            ConversationMessage? message = Bucket(_sessionKey.Length > 0 ? _sessionKey : _transcriptKey)
+                .FirstOrDefault(item => item.FileId == file.Id);
+            if (message != null)
+            {
+                message.FileProgress = file.Length;
+                message.SavedPath = file.Path;
+            }
+            if (file.Inbox)
+            {
+                _inbox.RememberArrival(new InboxArrival
+                {
+                    Name = file.Name,
+                    From = _inbox.NameFor(RemoteDeskId.Length > 0 ? RemoteDeskId : RemoteAddress),
+                    Path = file.Path,
+                    Size = file.Length,
+                    Utc = DateTime.UtcNow
+                });
+            }
+            NotifyChanged();
+        });
+        if (!string.IsNullOrWhiteSpace(RemoteFolder))
+            _ = SendListingAsync(file);
+    }
+
+    private void UpdateFileProgress(string id, long progress, string path)
+    {
+        ConversationMessage? message = Bucket(_sessionKey.Length > 0 ? _sessionKey : _transcriptKey)
+            .FirstOrDefault(item => item.FileId == id);
+        if (message == null)
+            return;
+        message.FileProgress = progress;
+        message.SavedPath = path;
     }
 
     private async Task SendListingAsync(IncomingFile file)
@@ -1107,6 +1714,7 @@ public sealed class ConversationViewModel : IAsyncDisposable
             _incoming[id] = file;
             if (keepName)
             {
+                TrackBrowseTransfer(id);
                 _downloadDirectory = null;
                 SetTransfer("Saving " + file.Name + " on this PC...");
             }
@@ -1116,10 +1724,7 @@ public sealed class ConversationViewModel : IAsyncDisposable
             }
         }
 
-        file.Write(packet.Data);
         bool chatFile = file.Path.StartsWith(_incomingDirectory, StringComparison.OrdinalIgnoreCase);
-        if (!chatFile)
-            TransferWindow.Report(file.Id, file.Name, file.Received, Math.Max(1, file.Length), () => CancelTransfer(file.Id));
         if (_stopped.Contains(id))
         {
             file.Abort();
@@ -1128,6 +1733,9 @@ public sealed class ConversationViewModel : IAsyncDisposable
                 TransferWindow.Finish(id);
             return;
         }
+        file.Write(packet.Data);
+        if (!chatFile)
+            TransferWindow.Report(file.Id, file.Name, file.Received, Math.Max(1, file.Length), () => CancelTransfer(file.Id));
         Post(() =>
         {
             ConversationMessage? message = Transcript.FirstOrDefault(item => item.FileId == id);
@@ -1194,7 +1802,7 @@ public sealed class ConversationViewModel : IAsyncDisposable
         return list;
     }
 
-    private static string CanonicalKey(string value)
+    public static string CanonicalKey(string value)
     {
         string text = (value ?? string.Empty).Trim();
         string digits = DigitsOnly(text);
@@ -1267,6 +1875,10 @@ public sealed class ConversationViewModel : IAsyncDisposable
                 string key = Path.GetFileNameWithoutExtension(file);
                 if (string.IsNullOrWhiteSpace(key))
                     continue;
+                if (_boundKey != null
+                    && !CanonicalKey(key).Equals(_boundKey, StringComparison.OrdinalIgnoreCase)
+                    && DigitsOnly(key) != DigitsOnly(_boundKey))
+                    continue;
                 StoredChat? stored = System.Text.Json.JsonSerializer.Deserialize<StoredChat>(File.ReadAllText(file));
                 if (stored?.Messages == null)
                     continue;
@@ -1309,6 +1921,10 @@ public sealed class ConversationViewModel : IAsyncDisposable
                 Directory.CreateDirectory(_transcriptDirectory);
                 foreach (KeyValuePair<string, ObservableCollection<ConversationMessage>> pair in _transcripts)
                 {
+                    if (_boundKey != null
+                        && !CanonicalKey(pair.Key).Equals(_boundKey, StringComparison.OrdinalIgnoreCase)
+                        && DigitsOnly(pair.Key) != DigitsOnly(_boundKey))
+                        continue;
                     string safe = SafeKey(pair.Key);
                     if (safe.Length == 0)
                         continue;
@@ -1365,64 +1981,124 @@ public sealed class ConversationViewModel : IAsyncDisposable
         Post(NotifyChanged);
     }
 
-    private void ClipTick(object? sender, EventArgs e) => PublishClipboard();
+    private void ClipTick(object? sender, EventArgs e) => _ = PublishClipboardAsync();
 
-    private void PublishClipboard()
+    public Task FlushClipboardAsync()
+    {
+        TaskCompletionSource tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Post(async () =>
+        {
+            try { await PublishClipboardAsync().ConfigureAwait(true); }
+            catch { }
+            tcs.TrySetResult();
+        });
+        return tcs.Task;
+    }
+
+    public async Task RequestPeerClipboardAsync()
+    {
+        IWireSession? session = LiveSession;
+        if (session is not { IsConnected: true })
+            return;
+        await session.SendAsync(WirePacket.Text("remote:clipflush")).ConfigureAwait(false);
+    }
+
+    private async Task PublishClipboardAsync()
     {
         try
         {
-            if (_clipUsers <= 0 || _session == null || !_session.IsConnected)
+            IWireSession? session = LiveSession;
+            if (_clipUsers <= 0 || session is not { IsConnected: true })
                 return;
-            if (ScreenShareService.AnyLive)
+            if (!ClipboardAllowed)
                 return;
             if (VirtualClipboard.IsCurrent())
-            {
-                _clipSignature = string.Empty;
                 return;
-            }
-            if (!System.Windows.Clipboard.ContainsFileDropList())
+            if (System.Windows.Clipboard.ContainsFileDropList())
             {
-                if (_clipSignature.Length > 0)
+                System.Collections.Specialized.StringCollection dropped = System.Windows.Clipboard.GetFileDropList();
+                List<string> files = new();
+                foreach (string? path in dropped)
                 {
-                    _clipSignature = string.Empty;
-                    lock (_clipGate)
-                        _hostClipFiles.Clear();
-                    _ = _session.SendAsync(WirePacket.Text("remote:clipboard"));
+                    if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                        files.Add(path);
                 }
+                if (files.Count == 0)
+                    return;
+                string signature = "f:" + string.Join("|", files);
+                if (signature == _clipSignature)
+                    return;
+                _clipSignature = signature;
+                lock (_clipGate)
+                {
+                    _hostClipFiles.Clear();
+                    _hostClipFiles.AddRange(files);
+                }
+                string payload = string.Join("\n", files.Select(path => Path.GetFileName(path) + "\t" + new FileInfo(path).Length));
+                await session.SendAsync(WirePacket.Text("remote:clipboard", payload)).ConfigureAwait(true);
                 return;
             }
 
-            System.Collections.Specialized.StringCollection dropped = System.Windows.Clipboard.GetFileDropList();
-            List<string> files = new();
-            foreach (string? path in dropped)
+            if (System.Windows.Clipboard.ContainsText())
             {
-                if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
-                    files.Add(path);
+                string text = System.Windows.Clipboard.GetText();
+                if (string.IsNullOrEmpty(text) || text.Length > 256 * 1024)
+                    return;
+                string signature = ClipTextSignature(text);
+                if (signature == _clipSignature)
+                    return;
+                _clipSignature = signature;
+                await session.SendAsync(WirePacket.Text("remote:cliptext", text)).ConfigureAwait(true);
+                return;
             }
-            if (files.Count == 0)
-                return;
-            string signature = string.Join("|", files);
-            if (signature == _clipSignature)
-                return;
-            _clipSignature = signature;
-            lock (_clipGate)
+
+            if (_clipSignature.Length > 0)
             {
-                _hostClipFiles.Clear();
-                _hostClipFiles.AddRange(files);
+                _clipSignature = string.Empty;
+                lock (_clipGate)
+                    _hostClipFiles.Clear();
+                await session.SendAsync(WirePacket.Text("remote:clipboard")).ConfigureAwait(true);
             }
-            string payload = string.Join("\n", files.Select(path => Path.GetFileName(path) + "\t" + new FileInfo(path).Length));
-            _ = _session.SendAsync(WirePacket.Text("remote:clipboard", payload));
         }
         catch (System.Runtime.InteropServices.ExternalException)
         {
         }
     }
 
+    private static string ClipTextSignature(string text)
+    {
+        int take = Math.Min(96, text.Length);
+        return "t:" + text.Length + ":" + text[..take];
+    }
+
+    private void ApplyClipText(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return;
+        try
+        {
+            _clipSignature = ClipTextSignature(text);
+            System.Windows.Clipboard.SetText(text);
+        }
+        catch (System.Runtime.InteropServices.ExternalException)
+        {
+        }
+    }
+
+    private bool ExplorerOfferOnClipboard => _explorerOffer && VirtualClipboard.IsCurrent();
+
     private void ApplyRemoteClipboard(string text)
     {
+        if (_explorerOffer && !VirtualClipboard.IsCurrent())
+            _explorerOffer = false;
+        if (!_peerClipboard || _explorerOffer)
+            return;
         if (string.IsNullOrWhiteSpace(text))
         {
-            if (_pasteStream == null)
+            bool busy;
+            lock (_clipGate)
+                busy = _pastes.Any(job => !job.Done);
+            if (!busy)
                 VirtualClipboard.ClearIfOurs();
             return;
         }
@@ -1435,106 +2111,149 @@ public sealed class ConversationViewModel : IAsyncDisposable
         }
         if (_remoteOffers.Count == 0)
             return;
+        _clipSignature = "f:" + string.Join("|", _remoteOffers.Select(item => item.Name + ":" + item.Size));
         List<ClipOffer> offers = _remoteOffers.ToList();
         VirtualClipboard.Offer(offers, BeginRemotePaste);
     }
 
     private ChunkStream? BeginExplorerPaste(int index)
     {
-        if (index < 0 || index >= _explorerPaths.Count || _session == null)
+        IWireSession? session = LiveSession;
+        if (index < 0 || index >= _explorerPaths.Count || session == null)
             return null;
-        return BeginPaste(_explorerOffers[index], () => _session.SendAsync(WirePacket.Text($"files:getfile:{Environment.MachineName}", _explorerPaths[index] + "\tclip")));
+        return BeginPaste(_explorerOffers[index], explorer: true, () => session.SendAsync(WirePacket.Text($"files:getfile:{Environment.MachineName}", _explorerPaths[index] + "\tclip")));
     }
 
     private ChunkStream? BeginRemotePaste(int index)
     {
-        if (index < 0 || index >= _remoteOffers.Count || _session == null)
+        IWireSession? session = LiveSession;
+        if (index < 0 || index >= _remoteOffers.Count || session == null)
             return null;
-        return BeginPaste(_remoteOffers[index], () => _session.SendAsync(WirePacket.Text("remote:clipget", index.ToString())));
+        return BeginPaste(_remoteOffers[index], explorer: false, () => session.SendAsync(WirePacket.Text("remote:clipget", index.ToString())));
     }
 
-    private ChunkStream BeginPaste(ClipOffer offer, Func<Task> request)
+    private ChunkStream BeginPaste(ClipOffer offer, bool explorer, Func<Task> request)
     {
-        ChunkStream stream = new(offer.Size);
-        string progress = "paste-" + Guid.NewGuid().ToString("N");
         lock (_clipGate)
         {
-            _pasteStream?.Complete();
-            _pasteStream = stream;
-            _pasteId = null;
-            _pasteProgress = progress;
-            _pasteName = offer.Name;
-            _pasteSize = offer.Size;
+            PasteJob? existing = _pastes.FirstOrDefault(job =>
+                !job.Done
+                && job.Explorer == explorer
+                && job.Size == offer.Size
+                && string.Equals(job.Name, offer.Name, StringComparison.OrdinalIgnoreCase));
+            if (existing != null)
+                return existing.Stream;
         }
-        TransferWindow.Report(progress, offer.Name, 0, Math.Max(1, offer.Size), CancelPaste);
+
+        ChunkStream stream = new(offer.Size);
+        PasteJob created = new(stream, "paste-" + Guid.NewGuid().ToString("N"), offer.Name, offer.Size, explorer);
+        lock (_clipGate)
+        {
+            PasteJob? existing = _pastes.FirstOrDefault(job =>
+                !job.Done
+                && job.Explorer == explorer
+                && job.Size == offer.Size
+                && string.Equals(job.Name, offer.Name, StringComparison.OrdinalIgnoreCase));
+            if (existing != null)
+                return existing.Stream;
+            _pastes.Add(created);
+        }
+        TransferWindow.Report(created.Progress, created.Name, 0, Math.Max(1, created.Size), () => CancelPaste(created));
         _ = request();
         return stream;
     }
 
     private void ReceiveClip(WirePacket packet)
     {
-        string[] parts = packet.Instruction.Split(':');
-        if (parts.Length < 4)
+        if (!TryWireFile(packet.Instruction, out string id, out string wireName, out long total, out _))
             return;
-        string id = parts[1];
-        long.TryParse(parts[3], out long total);
-        ChunkStream? stream;
-        string progress;
-        string name;
-        long size;
+        PasteJob? job;
         lock (_clipGate)
         {
-            stream = _pasteStream;
-            if (stream == null)
+            job = _pastes.FirstOrDefault(item => !item.Done && string.Equals(item.NetworkId, id, StringComparison.Ordinal))
+                ?? _pastes.FirstOrDefault(item => !item.Done && item.NetworkId == null && string.Equals(item.Name, wireName, StringComparison.OrdinalIgnoreCase));
+            if (job == null)
+            {
+                List<PasteJob> waiting = _pastes.Where(item => !item.Done && item.NetworkId == null).ToList();
+                if (waiting.Count == 1)
+                    job = waiting[0];
+            }
+            if (job == null)
                 return;
-            _pasteId ??= id;
-            if (!string.Equals(_pasteId, id, StringComparison.Ordinal))
-                return;
-            progress = _pasteProgress;
-            name = _pasteName;
-            size = total > 0 ? total : _pasteSize;
+            job.NetworkId ??= id;
         }
         if (_stopped.Contains(id))
         {
-            CancelPaste();
+            CancelPaste(job);
             return;
         }
         if (packet.Data is { Length: > 0 })
-            stream.Add(packet.Data);
-        long written = stream.Written;
-        TransferWindow.Report(progress, name, written, Math.Max(1, size), CancelPaste);
-        if (written < size && size > 0)
-            return;
-        lock (_clipGate)
+            job.Stream.Add(packet.Data);
+        long size = Math.Max(job.Size, Math.Max(0, total));
+        long written = job.Stream.Written;
+        TransferWindow.Report(job.Progress, job.Name, written, Math.Max(1, size), () => CancelPaste(job));
+        if (size > 0)
         {
-            if (ReferenceEquals(_pasteStream, stream))
-                _pasteStream = null;
+            if (written < size)
+                return;
         }
-        stream.Complete();
-        TransferWindow.Finish(progress);
-        SetTransfer("Pasted " + name + " on this PC.");
+        else if (packet.Data is { Length: > 0 })
+        {
+            return;
+        }
+        lock (_clipGate)
+            job.Done = true;
+        job.Stream.Complete();
+        TransferWindow.Finish(job.Progress);
+        SetTransfer("Pasted " + job.Name + " on this PC.");
     }
 
-    private void CancelPaste()
+    private static bool TryWireFile(string instruction, out string id, out string name, out long total, out long offset)
     {
-        ChunkStream? stream;
+        id = string.Empty;
+        name = string.Empty;
+        total = 0;
+        offset = 0;
+        int head = instruction.IndexOf(':');
+        int idEnd = head >= 0 ? instruction.IndexOf(':', head + 1) : -1;
+        int offsetColon = instruction.LastIndexOf(':');
+        int lengthColon = offsetColon > 0 ? instruction.LastIndexOf(':', offsetColon - 1) : -1;
+        if (idEnd <= head || lengthColon <= idEnd)
+            return false;
+        id = instruction[(head + 1)..idEnd];
+        name = instruction[(idEnd + 1)..lengthColon];
+        if (!long.TryParse(instruction[(lengthColon + 1)..offsetColon], out total))
+            return false;
+        long.TryParse(instruction[(offsetColon + 1)..], out offset);
+        return true;
+    }
+
+    private void CancelPastes(bool explorer)
+    {
+        List<PasteJob> jobs;
+        lock (_clipGate)
+            jobs = _pastes.Where(job => !job.Done && job.Explorer == explorer).ToList();
+        foreach (PasteJob job in jobs)
+            CancelPaste(job);
+    }
+
+    private void CancelPaste(PasteJob job)
+    {
         string? networkId;
-        string progress;
         lock (_clipGate)
         {
-            stream = _pasteStream;
-            networkId = _pasteId;
-            progress = _pasteProgress;
-            _pasteStream = null;
+            if (job.Done)
+                return;
+            job.Done = true;
+            networkId = job.NetworkId;
         }
-        stream?.Complete();
+        job.Stream.Complete();
         if (!string.IsNullOrEmpty(networkId))
         {
             _stopped.Add(networkId);
-            _ = _session?.SendAsync(WirePacket.Text("transfer:cancel", networkId));
+            _ = LiveSession?.SendAsync(WirePacket.Text("transfer:cancel", networkId));
         }
-        if (!string.IsNullOrEmpty(progress))
-            TransferWindow.Finish(progress);
+        TransferWindow.Finish(job.Progress);
     }
 
     private void SessionStatusChanged(IWireSession session, string status)
@@ -1598,38 +2317,107 @@ public sealed class ConversationViewModel : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         SaveAll();
+        _packetQueue.Writer.TryComplete();
         await DisconnectAsync(userInitiated: true).ConfigureAwait(false);
         _liveGate.Dispose();
     }
 
+    private sealed class PasteJob
+    {
+        public PasteJob(ChunkStream stream, string progress, string name, long size, bool explorer)
+        {
+            Stream = stream;
+            Progress = progress;
+            Name = name;
+            Size = size;
+            Explorer = explorer;
+        }
+
+        public ChunkStream Stream { get; }
+        public string Progress { get; }
+        public string Name { get; }
+        public long Size { get; }
+        public bool Explorer { get; }
+        public string? NetworkId { get; set; }
+        public bool Done { get; set; }
+    }
+
     private sealed class IncomingFile
     {
-        private readonly FileStream _stream;
-        public IncomingFile(string id, string name, long length, string directory, bool keepName = false)
+        private FileStream? _stream;
+        public IncomingFile(string id, string name, long length, string directory, bool keepName = false, bool inbox = false)
         {
             Id = id;
             Name = Sanitize(name);
             Length = length;
+            Inbox = inbox;
+            if (inbox)
+            {
+                string final = System.IO.Path.Combine(directory, Name);
+                Path = final + ".kdockpart";
+                if (File.Exists(final) && new FileInfo(final).Length == length)
+                {
+                    Path = final;
+                    Received = length;
+                    return;
+                }
+                _stream = new FileStream(Path, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read);
+                if (_stream.Length > length)
+                    _stream.SetLength(0);
+                _stream.Seek(0, SeekOrigin.End);
+                Received = _stream.Length;
+                return;
+            }
             Path = System.IO.Path.Combine(directory, keepName ? Name : id + "-" + Name);
             _stream = new FileStream(Path, FileMode.Create, FileAccess.Write, FileShare.None);
         }
         public string Id { get; }
         public string Name { get; }
         public long Length { get; }
-        public string Path { get; }
+        public string Path { get; private set; }
+        public bool Inbox { get; }
         public long Received { get; private set; }
         public bool Completed => Received >= Length;
         public void Abort()
         {
-            try { _stream.Dispose(); } catch { }
+            try { _stream?.Dispose(); } catch { }
+            _stream = null;
             try { if (File.Exists(Path)) File.Delete(Path); } catch { }
         }
-        public void Write(byte[] data)
+        public void Seek(long at)
         {
+            if (_stream == null)
+                return;
+            at = Math.Clamp(at, 0, Math.Max(0, Length));
+            _stream.Seek(at, SeekOrigin.Begin);
+            Received = at;
+        }
+        public void Write(byte[]? data)
+        {
+            data ??= Array.Empty<byte>();
+            if (_stream == null || data.Length == 0 && Length > 0)
+                return;
             _stream.Write(data, 0, data.Length);
             Received += data.Length;
             if (Completed)
-                _stream.Dispose();
+                Complete();
+        }
+        public void Complete()
+        {
+            try { _stream?.Dispose(); } catch { }
+            _stream = null;
+            if (!Inbox || !Path.EndsWith(".kdockpart", StringComparison.OrdinalIgnoreCase))
+                return;
+            string final = Path[..^".kdockpart".Length];
+            try
+            {
+                if (File.Exists(Path))
+                    File.Move(Path, final, true);
+                Path = final;
+            }
+            catch (IOException)
+            {
+            }
         }
         private static string Sanitize(string name)
         {

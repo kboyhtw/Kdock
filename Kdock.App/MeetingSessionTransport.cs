@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.WebSockets;
@@ -27,6 +28,7 @@ public sealed class MeetingSessionTransport : IWireSession
 
     public bool IsConnected => _socket.State == WebSocketState.Open && Volatile.Read(ref _closed) == 0;
     public bool ProtocolMatched { get; private set; }
+    public string PeerDeskId { get; private set; } = string.Empty;
 
     public event Action<WirePacket>? PacketReceived;
     public event Action<string>? StatusChanged;
@@ -41,7 +43,7 @@ public sealed class MeetingSessionTransport : IWireSession
         await socket.ConnectAsync(uri, cancellationToken).ConfigureAwait(false);
         MeetingSessionTransport session = new(socket);
         session._receiveTask = Task.Run(() => session.ReceiveLoopAsync(session._stop.Token), cancellationToken);
-        await session.SendAsync(WirePacket.Text($"{Protocol.Hello}:{Protocol.Current}:{Protocol.Product}")).ConfigureAwait(false);
+        await session.SendAsync(WirePacket.Text($"{Protocol.Hello}:{Protocol.Current}:{Protocol.Product}:{App.State.DeskId}")).ConfigureAwait(false);
         try
         {
             await session._hello.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
@@ -139,6 +141,12 @@ public sealed class MeetingSessionTransport : IWireSession
                 ProtocolMismatch?.Invoke();
                 Close("Update Kdock on both PCs.");
                 return;
+            }
+            if (parts.Length >= 4)
+            {
+                string desk = new string(parts[3].Where(char.IsDigit).ToArray());
+                if (desk.Length == 10)
+                    PeerDeskId = desk;
             }
             ProtocolMatched = true;
             _hello.TrySetResult(true);

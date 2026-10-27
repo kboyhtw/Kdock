@@ -20,6 +20,8 @@ public enum Presence
 public sealed class PersonRecord : INotifyPropertyChanged
 {
     private bool _isFavorite;
+    private bool _isTrusted;
+    private Presence _presence;
 
     public string DeskId { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
@@ -36,10 +38,52 @@ public sealed class PersonRecord : INotifyPropertyChanged
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Star)));
         }
     }
-    public bool IsTrusted { get; set; }
-    public Presence Presence { get; set; }
+    public bool IsTrusted
+    {
+        get => _isTrusted;
+        set
+        {
+            if (_isTrusted == value)
+                return;
+            _isTrusted = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsTrusted)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(TrustLabel)));
+        }
+    }
+    public Presence Presence
+    {
+        get => _presence;
+        set
+        {
+            if (_presence == value)
+                return;
+            _presence = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Presence)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(PresenceLabel)));
+        }
+    }
     public DateTime LastSeenUtc { get; set; }
     public string Star => IsFavorite ? "★" : "☆";
+    public string TrustLabel => IsTrusted ? "Trusted" : "Code once";
+    public string PresenceLabel => Presence switch
+    {
+        Presence.Online => "Available",
+        Presence.InSession => "Connected",
+        _ => "Offline"
+    };
+    public string Initials
+    {
+        get
+        {
+            string name = (DisplayName ?? string.Empty).Trim();
+            string[] parts = name.Split([' ', '-', ':'], StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 2 && parts[0].Length > 0 && parts[1].Length > 0)
+                return string.Concat(char.ToUpperInvariant(parts[0][0]), char.ToUpperInvariant(parts[1][0]));
+            if (name.Length >= 2)
+                return name[..2].ToUpperInvariant();
+            return name.Length == 1 ? name.ToUpperInvariant() : "?";
+        }
+    }
     public event PropertyChangedEventHandler? PropertyChanged;
 }
 

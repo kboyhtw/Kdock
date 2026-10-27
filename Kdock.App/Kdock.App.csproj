@@ -1,1 +1,49 @@
-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWPF>true</UseWPF><UseWindowsForms>true</UseWindowsForms><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><LangVersion>latest</LangVersion><RootNamespace>Kdock.App</RootNamespace><AssemblyName>Kdock.App</AssemblyName><RuntimeIdentifier>win-x64</RuntimeIdentifier><SelfContained>true</SelfContained><PublishSingleFile>true</PublishSingleFile><IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract><EnableCompressionInSingleFile>true</EnableCompressionInSingleFile><DebugType>embedded</DebugType><CopyOutputSymbolsToPublishDirectory>false</CopyOutputSymbolsToPublishDirectory></PropertyGroup><ItemGroup><ProjectReference Include="..\Kdock.Wire\Kdock.Wire.csproj" /></ItemGroup></Project>
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Kdock.App</RootNamespace>
+    <AssemblyName>Kdock.App</AssemblyName>
+    <DebugType>embedded</DebugType>
+    <ApplicationIcon>Resources\kdock.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <Company>Decimal Tech</Company>
+    <Authors>Decimal Tech</Authors>
+    <Product>Kdock</Product>
+    <AssemblyTitle>Kdock</AssemblyTitle>
+    <Description>Kdock remote desktop, chat, and inbox by Decimal Tech</Description>
+    <Copyright>Copyright © Decimal Tech</Copyright>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <NeutralLanguage>en</NeutralLanguage>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(PublishDir)' != ''">
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <CopyOutputSymbolsToPublishDirectory>false</CopyOutputSymbolsToPublishDirectory>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Kdock.Wire\Kdock.Wire.csproj" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <Resource Include="Resources\kdock.ico" />
+  </ItemGroup>
+  <Target Name="SignKdockExe" AfterTargets="Build" Condition="'$(DesignTimeBuild)' != 'true'">
+    <PropertyGroup>
+      <KdockSignedExe>$(TargetDir)$(AssemblyName).exe</KdockSignedExe>
+    </PropertyGroup>
+    <Message Importance="high" Text="Signing $(KdockSignedExe)" />
+    <Exec Command="&quot;$(WINDIR)\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Sign-Kdock.ps1&quot; &quot;$(KdockSignedExe)&quot;" IgnoreExitCode="true" />
+  </Target>
+  <Target Name="SignKdockPublish" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
+    <Exec Command="&quot;$(WINDIR)\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\Sign-Kdock.ps1&quot; &quot;$(PublishDir)Kdock.App.exe&quot;" IgnoreExitCode="true" />
+  </Target>
+</Project>

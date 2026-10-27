@@ -169,6 +169,7 @@ internal sealed class VirtualFileClipboard : IDataObject
     private readonly List<ClipOffer> _files;
     private readonly Func<int, ChunkStream?> _begin;
     private readonly List<ChunkStream> _streams = new();
+    private readonly Dictionary<int, ChunkStream> _byIndex = new();
     private static int _generationSource;
     private static ushort _descriptor;
     private static ushort _contents;
@@ -235,9 +236,16 @@ internal sealed class VirtualFileClipboard : IDataObject
                     index = 0;
                 if (index < 0 || index >= _files.Count)
                     return BadIndex;
+                if (_byIndex.TryGetValue(index, out ChunkStream? existing))
+                {
+                    medium.tymed = TymedStream;
+                    medium.unionmember = Marshal.GetIUnknownForObject(existing);
+                    return Ok;
+                }
                 ChunkStream? stream = _begin(index);
                 if (stream == null)
                     return BadIndex;
+                _byIndex[index] = stream;
                 _streams.Add(stream);
                 medium.tymed = TymedStream;
                 medium.unionmember = Marshal.GetIUnknownForObject(stream);

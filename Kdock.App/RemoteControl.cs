@@ -17,7 +17,7 @@ internal static class RemoteControl
     private static DateTime _lastInject = DateTime.MinValue;
     private static bool _yieldToLocal;
 
-    public static void Apply(string input)
+    public static void Apply(string input, ScreenShareService? share)
     {
         if (string.IsNullOrWhiteSpace(input))
             return;
@@ -47,28 +47,24 @@ internal static class RemoteControl
                 && int.TryParse(parts[0], out int shareQuality)
                 && int.TryParse(parts[1], out int sharePace)
                 && int.TryParse(parts[2], out int shareWidth))
-            {
-                ScreenShareService.JpegQuality = Math.Clamp(shareQuality, 25, 95);
-                ScreenShareService.FrameDelayMs = Math.Clamp(sharePace, 40, 500);
-                ScreenShareService.MaxWidth = shareWidth <= 0 ? 0 : Math.Clamp(shareWidth, 640, 3840);
-                ScreenShareService.SmoothScale = parts.Length < 4 || parts[3] != "0";
-                ScreenShareService.SkipStillFrames = parts.Length >= 5 && parts[4] == "1";
-            }
+                share?.Configure(Math.Clamp(shareQuality, 30, 95), Math.Clamp(sharePace, 8, 200), shareWidth);
             return;
         }
+        if (share == null)
+            return;
         if (input.StartsWith("<%", StringComparison.Ordinal) && input.EndsWith("%>", StringComparison.Ordinal))
         {
             if (int.TryParse(input[2..^2], out int quality))
-                ScreenShareService.JpegQuality = Math.Clamp(quality, 25, 95);
+                share.Configure(quality, share.FrameDelayMs, share.MaxWidth);
             return;
         }
         if (input.StartsWith("pace:", StringComparison.Ordinal) && int.TryParse(input[5..], out int pace))
         {
-            ScreenShareService.FrameDelayMs = Math.Clamp(pace, 40, 500);
+            share.Configure(share.JpegQuality, Math.Clamp(pace, 40, 500), share.MaxWidth);
             return;
         }
         if (input.StartsWith("scale:", StringComparison.Ordinal) && int.TryParse(input[6..], out int width))
-            ScreenShareService.MaxWidth = width <= 0 ? 0 : Math.Clamp(width, 640, 3840);
+            share.Configure(share.JpegQuality, share.FrameDelayMs, width);
     }
 
     private static void InjectMouse(int x, int y, string action, int wheel)

@@ -15,24 +15,14 @@ public partial class FilesWindow : Window
     private bool _heldMove;
     private System.ComponentModel.ListSortDirection _direction = System.ComponentModel.ListSortDirection.Ascending;
     private string _sort = "Name";
+    private Rect _restore = Rect.Empty;
+    private bool _filled;
 
     public FilesWindow(ConversationViewModel conversation)
     {
         _conversation = conversation;
         InitializeComponent();
-        MouseLeftButtonDown += (_, e) =>
-        {
-            if (e.LeftButton != MouseButtonState.Pressed)
-                return;
-            System.Windows.DependencyObject? source = e.OriginalSource as System.Windows.DependencyObject;
-            while (source != null)
-            {
-                if (source is System.Windows.Controls.Button or System.Windows.Controls.TextBox or System.Windows.Controls.ListView or System.Windows.Controls.ListBox)
-                    return;
-                source = System.Windows.Media.VisualTreeHelper.GetParent(source);
-            }
-            DragMove();
-        };
+        WindowSkin.Apply(this);
         DetailList.ItemsSource = _conversation.RemoteFiles;
         IconList.ItemsSource = _conversation.RemoteFiles;
         _conversation.Changed += ConversationChanged;
@@ -47,12 +37,63 @@ public partial class FilesWindow : Window
     {
         if (e.LeftButton != MouseButtonState.Pressed)
             return;
+        if (e.OriginalSource is System.Windows.DependencyObject source)
+        {
+            while (source != null)
+            {
+                if (source is System.Windows.Controls.Button)
+                    return;
+                source = System.Windows.Media.VisualTreeHelper.GetParent(source);
+            }
+        }
+        if (e.ClickCount == 2)
+        {
+            ToggleFill();
+            e.Handled = true;
+            return;
+        }
+        if (_filled)
+            ToggleFill();
         DragMove();
     }
 
     private void MinimizeClick(object sender, RoutedEventArgs e)
     {
         WindowState = WindowState.Minimized;
+    }
+
+    private void MaximizeClick(object sender, RoutedEventArgs e)
+    {
+        ToggleFill();
+    }
+
+    private void ToggleFill()
+    {
+        if (_filled)
+        {
+            if (_restore.Width > 0 && _restore.Height > 0)
+            {
+                Left = _restore.X;
+                Top = _restore.Y;
+                Width = _restore.Width;
+                Height = _restore.Height;
+            }
+            WindowState = WindowState.Normal;
+            _filled = false;
+            MaxButton.Content = "☐";
+            MaxButton.ToolTip = "Maximize";
+            return;
+        }
+        _restore = new Rect(Left, Top, ActualWidth, ActualHeight);
+        Rect area = SystemParameters.WorkArea;
+        WindowState = WindowState.Normal;
+        Left = area.Left;
+        Top = area.Top;
+        Width = area.Width;
+        Height = area.Height;
+        _filled = true;
+        MaxButton.Content = "❐";
+        MaxButton.ToolTip = "Restore";
     }
 
     private void CloseClick(object sender, RoutedEventArgs e)
@@ -74,11 +115,7 @@ public partial class FilesWindow : Window
 
     private System.Windows.Controls.ContextMenu BuildMenu()
     {
-        System.Windows.Controls.ContextMenu menu = new()
-        {
-            Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(28, 32, 48)),
-            Foreground = System.Windows.Media.Brushes.White
-        };
+        System.Windows.Controls.ContextMenu menu = new();
         Add(menu, "Open", (_, _) => _ = OpenSelected());
         Add(menu, "Copy", (_, _) => CopyClick(this, new RoutedEventArgs()));
         Add(menu, "Cut", (_, _) => CutClick(this, new RoutedEventArgs()));
@@ -345,6 +382,7 @@ public partial class FilesWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         _conversation.Changed -= ConversationChanged;
+        _ = _conversation.NotifyFilesWindowClosedAsync();
         base.OnClosed(e);
     }
 }

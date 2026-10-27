@@ -9,7 +9,8 @@ public partial class App : System.Windows.Application
     public static AppState State { get; private set; } = null!;
     public static SessionListener LanListener { get; private set; } = null!;
     public static MeetingClient Meeting { get; private set; } = null!;
-    public static ConversationViewModel Conversation { get; private set; } = null!;
+    public static ConversationHub Sessions { get; private set; } = null!;
+    public static ConversationViewModel Conversation => Sessions.Shell;
     public static bool IsPeopleOpen { get; set; }
     public static event EventHandler<SessionAcceptedEventArgs>? SessionAccepted;
     public static event Func<IncomingCall, Task>? CallReceived;
@@ -18,9 +19,11 @@ public partial class App : System.Windows.Application
     protected override void OnStartup(StartupEventArgs e)
     {
         State = new AppState();
-        Conversation = new ConversationViewModel(State.DataDirectory);
+        AppSettings.Current = new AppSettings(State.DataDirectory);
+        AppSettings.Current.ApplyTheme();
+        Sessions = new ConversationHub(State.DataDirectory);
         Directory.CreateDirectory(ConversationViewModel.InboxFolder);
-        Conversation.ChatTouched += RememberChat;
+        Sessions.ChatTouched += RememberChat;
         Meeting = new MeetingClient(State.DataDirectory);
         Meeting.StartCallEvents(
             State.DeskId,
@@ -35,8 +38,8 @@ public partial class App : System.Windows.Application
     protected override void OnExit(ExitEventArgs e)
     {
         LanListener.SessionAccepted -= LanSessionAccepted;
-        Conversation.ChatTouched -= RememberChat;
-        Conversation.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        Sessions.ChatTouched -= RememberChat;
+        Sessions.DisposeAsync().AsTask().GetAwaiter().GetResult();
         Meeting.Dispose();
         LanListener.DisposeAsync().AsTask().GetAwaiter().GetResult();
         base.OnExit(e);
@@ -63,13 +66,13 @@ public partial class App : System.Windows.Application
         SessionAccepted?.Invoke(sender, e);
         try
         {
-            if (Conversation.TakeSelfPeer())
+            if (Sessions.TryTakeSelfPeer(out ConversationViewModel? self) && self != null)
             {
-                Conversation.AttachPeer(e.Session);
+                self.AttachPeer(e.Session);
                 return;
             }
-            await Conversation.AcceptSessionAsync(e.Session, e.RemoteAddress);
-            RememberChat(e.RemoteAddress);
+            await Sessions.ForIncoming(e.RemoteAddress, e.Session.PeerDeskId).AcceptSessionAsync(e.Session, e.RemoteAddress);
+            RememberChat(e.Session.PeerDeskId.Length == 10 ? e.Session.PeerDeskId : e.RemoteAddress);
         }
         catch
         {

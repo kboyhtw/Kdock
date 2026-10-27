@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
@@ -19,30 +20,37 @@ public partial class PeopleWindow : Window
     private readonly Window _dock;
     private readonly PeopleViewModel _viewModel;
     private readonly MeetingClient _meetingClient;
-    private readonly ConversationViewModel _conversation;
+    private ConversationViewModel _conversation;
     private readonly CancellationTokenSource _stop = new();
     private readonly DispatcherTimer _presenceTimer;
     private NetworkDiscovery? _discovery;
     private ICollectionView? _peopleView;
-    private FilesWindow? _filesWindow;
-    private RemoteWindow? _remoteWindow;
+    private readonly Dictionary<string, FilesWindow> _filesWindows = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, RemoteWindow> _remoteWindows = new(StringComparer.OrdinalIgnoreCase);
     private PersonRecord? _activePerson;
 
     public PeopleWindow(Window dock)
     {
         _dock = dock;
         InitializeComponent();
+        WindowSkin.Apply(this);
         _viewModel = new PeopleViewModel(App.State);
         _meetingClient = App.Meeting;
-        _conversation = App.Conversation;
-        _conversation.Changed += ConversationChanged;
-        _conversation.RemoteFrameReceived += RemoteFrameReceived;
-        _conversation.ShowPanel += ShowSidePanel;
-        _conversation.ViewEnded += ViewEnded;
-        _conversation.RestoreSession = RestoreActiveAsync;
+        _conversation = App.Sessions.Shell;
+        App.Sessions.RemoteFrame += SessionFrameReceived;
+        App.Sessions.RemoteDelta += SessionDeltaReceived;
+        App.Sessions.RemoteH264 += SessionH264Received;
+        App.Sessions.RemoteRegion += SessionRegionReceived;
+        App.Sessions.RemoteCursor += SessionCursorReceived;
+        App.Sessions.Panel += SessionPanel;
+        App.Sessions.ViewEnded += SessionViewEnded;
+        App.Sessions.FilesClosed += SessionFilesClosed;
+        App.Sessions.Changed += SessionsChanged;
+        App.Sessions.SessionCreated += AttachRestore;
+        foreach (ConversationViewModel session in App.Sessions.All)
+            AttachRestore(session);
         DataContext = _viewModel;
         ConversationList.ItemsSource = _conversation.Transcript;
-        ServerBox.Text = _meetingClient.ServerAddress;
         LocalEndpointText.Text = "LAN endpoint: starting...";
         _presenceTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
         _presenceTimer.Tick += PresenceTimerTick;
@@ -54,6 +62,16 @@ public partial class PeopleWindow : Window
     private void CloseClick(object sender, RoutedEventArgs e)
     {
         Close();
+    }
+
+    private void MinimizeClick(object sender, RoutedEventArgs e)
+    {
+        WindowState = WindowState.Minimized;
+    }
+
+    private void MaximizeClick(object sender, RoutedEventArgs e)
+    {
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
     }
 
     private void HeaderDrag(object sender, MouseButtonEventArgs e)
@@ -150,13 +168,19 @@ public partial class PeopleWindow : Window
 
     public Task ShowPairCode(string fromId, string code) => HandlePairRequestAsync(fromId, code);
 
+    private void OpenSettingsClick(object sender, RoutedEventArgs e)
+    {
+        new SettingsWindow { Owner = this }.ShowDialog();
+    }
+
     public async Task SendToInboxAsync(string deskId, IReadOnlyList<string> files)
     {
         PersonRecord person = RememberPerson(deskId);
+        ConversationViewModel session = UsePeer(person.DeskId);
         _activePerson = person;
-        _conversation.RequestLive();
+        session.RequestLive();
         await ConnectPersonAsync(person);
-        await _conversation.SendToInboxAsync(files, _stop.Token);
+        await session.SendToInboxAsync(deskId, files, _stop.Token);
         ConversationStatus.Text = "Sent to their Inbox (" + person.DisplayName + ")";
     }
 
@@ -164,13 +188,18 @@ public partial class PeopleWindow : Window
     {
         try
         {
-            MeetingSessionTransport session = await _meetingClient.JoinSessionAsync(call.Token, _stop.Token);
-            await _conversation.AcceptSessionAsync(session, call.FromId);
-            await Dispatcher.InvokeAsync(() =>
+            ConversationViewModel peer = await Dispatcher.InvokeAsync(() =>
             {
                 _activePerson = RememberPerson(call.FromId);
-                ConversationTitle.Text = _activePerson.DisplayName;
-                ConversationStatus.Text = "Incoming meeting call connected";
+                return UsePeer(call.FromId);
+            });
+            MeetingSessionTransport session = await _meetingClient.JoinSessionAsync(call.Token, _stop.Token);
+            await peer.AcceptSessionAsync(session, call.FromId);
+            await Dispatcher.InvokeAsync(() =>
+            {
+                MarkTrusted(call.FromId);
+                ConversationTitle.Text = _activePerson?.DisplayName ?? call.FromId;
+                ConversationStatus.Text = "Connected · trusted device. Next time no code.";
             });
         }
         catch (Exception ex)
@@ -185,12 +214,20 @@ public partial class PeopleWindow : Window
         _presenceTimer.Stop();
         if (_discovery != null)
             _ = _discovery.DisposeAsync().AsTask();
-        _conversation.Changed -= ConversationChanged;
-        _conversation.RemoteFrameReceived -= RemoteFrameReceived;
-        _conversation.ShowPanel -= ShowSidePanel;
-        _conversation.ViewEnded -= ViewEnded;
+        DetachUi(_conversation);
+        App.Sessions.RemoteFrame -= SessionFrameReceived;
+        App.Sessions.RemoteDelta -= SessionDeltaReceived;
+        App.Sessions.RemoteH264 -= SessionH264Received;
+        App.Sessions.RemoteRegion -= SessionRegionReceived;
+        App.Sessions.RemoteCursor -= SessionCursorReceived;
+        App.Sessions.Panel -= SessionPanel;
+        App.Sessions.ViewEnded -= SessionViewEnded;
+        App.Sessions.FilesClosed -= SessionFilesClosed;
+        App.Sessions.Changed -= SessionsChanged;
+        App.Sessions.SessionCreated -= AttachRestore;
+        foreach (ConversationViewModel session in App.Sessions.All)
+            session.RestoreSession = null;
         _meetingClient.ServerConnectionChanged -= ServerConnectionChanged;
-        _conversation.RestoreSession = null;
         App.IsPeopleOpen = false;
         _stop.Dispose();
     }
@@ -202,17 +239,50 @@ public partial class PeopleWindow : Window
             code = Random.Shared.Next(0, 1_000_000).ToString("D6");
             await _meetingClient.RegisterPairCodeAsync(fromId, App.State.DeskId, code);
         }
-        await Dispatcher.InvokeAsync(() =>
-            System.Windows.MessageBox.Show(this, fromId + " wants to connect.\r\nCode: " + code, "Allow connection"));
+        string who = App.Conversation.Inbox.NameFor(Digits(fromId).Length == 10 ? Digits(fromId) : fromId);
+        await Dispatcher.InvokeAsync(() => PairCodeWindow.ShowCode(this, who, code));
     }
 
-    private Task RestoreActiveAsync(CancellationToken cancellationToken)
+    private void AttachRestore(ConversationViewModel session)
     {
-        PersonRecord? person = _activePerson;
-        if (person == null)
-            return Task.CompletedTask;
-        _conversation.RequestLive();
-        return Dispatcher.InvokeAsync(() => ConnectPersonAsync(person)).Task.Unwrap();
+        session.RestoreSession = token => RestoreSessionAsync(session, token);
+    }
+
+    private Task RestoreSessionAsync(ConversationViewModel session, CancellationToken cancellationToken)
+    {
+        return Dispatcher.InvokeAsync(() =>
+        {
+            PersonRecord person = RememberPerson(session.PeerKey.Length > 0 ? session.PeerKey : session.RemoteDeskId);
+            session.RequestLive();
+            return ConnectPersonAsync(person);
+        }).Task.Unwrap();
+    }
+
+    private ConversationViewModel UsePeer(string id)
+    {
+        PersonRecord? person = _viewModel.People.FirstOrDefault(item => item.DeskId.Equals(id, StringComparison.OrdinalIgnoreCase));
+        ConversationViewModel next = App.Sessions.FindLive(id)
+            ?? App.Sessions.FindLive(person?.LastAddress ?? string.Empty)
+            ?? App.Sessions.Activate(id);
+        if (!ReferenceEquals(_conversation, next))
+        {
+            DetachUi(_conversation);
+            AttachUi(next);
+            _conversation = next;
+        }
+        ConversationList.ItemsSource = next.Transcript;
+        ConversationPane.Visibility = Visibility.Visible;
+        return next;
+    }
+
+    private void AttachUi(ConversationViewModel session)
+    {
+        session.Changed += ConversationChanged;
+    }
+
+    private void DetachUi(ConversationViewModel session)
+    {
+        session.Changed -= ConversationChanged;
     }
 
     private PersonRecord RememberPerson(string id)
@@ -223,12 +293,11 @@ public partial class PeopleWindow : Window
         PersonRecord person = new()
         {
             DeskId = deskId,
-            DisplayName = deskId.Length == 10 ? AppState.FormatDeskId(deskId) : id,
+            DisplayName = _conversation.Inbox.NameFor(deskId),
             LastAddress = IsLanAddress(id) ? id : string.Empty,
             IsFavorite = _viewModel.Store.Favorites.Contains(deskId),
-            IsTrusted = true
+            IsTrusted = _viewModel.Store.Trusted.Contains(deskId)
         };
-        _viewModel.Store.SetTrusted(deskId, true);
         _viewModel.Upsert(person);
         return person;
     }
@@ -236,6 +305,7 @@ public partial class PeopleWindow : Window
     private async Task ConnectPersonAsync(PersonRecord person)
     {
         _activePerson = person;
+        UsePeer(person.DeskId);
         ConversationTitle.Text = person.DisplayName;
         if (IsThisPc(person))
         {
@@ -271,7 +341,8 @@ public partial class PeopleWindow : Window
         if (id.Length != 10 && !string.IsNullOrWhiteSpace(person.LastAddress) && IsLanAddress(person.LastAddress))
         {
             await _conversation.ConnectDirectAsync(person.LastAddress, _stop.Token);
-            ConversationStatus.Text = _conversation.Status;
+            MarkTrusted(person.DeskId);
+            ConversationStatus.Text = "Connected · trusted device";
             return;
         }
         if (id.Length != 10)
@@ -295,8 +366,8 @@ public partial class PeopleWindow : Window
                 ConversationStatus.Text = askError;
                 return;
             }
-            ConversationStatus.Text = "A 6-digit code should now be on the other PC. Type it here.";
-            code = Prompt("A 6-digit code is on the other PC. Type it here.");
+            ConversationStatus.Text = "First connection — type the 6-digit code on the other PC.";
+            code = PairCodeWindow.AskCode(this, "Type the 6-digit code shown on the other PC. After this call they become a trusted device. Next time, no code.");
             if (string.IsNullOrWhiteSpace(code))
             {
                 ConversationStatus.Text = "Connection cancelled.";
@@ -313,109 +384,209 @@ public partial class PeopleWindow : Window
 
         MeetingSessionTransport session = await _meetingClient.JoinSessionAsync(token, _stop.Token);
         await _conversation.AcceptSessionAsync(session, id);
-        if (!trusted)
-            _viewModel.Store.SetTrusted(id, true);
-        ConversationStatus.Text = "Connected";
+        MarkTrusted(id);
+        ConversationStatus.Text = trusted
+            ? "Connected · trusted device"
+            : "Connected · trusted. Next time no code.";
+    }
+
+    private void MarkTrusted(string deskId)
+    {
+        string id = Digits(deskId);
+        if (id.Length == 0)
+            id = deskId;
+        _viewModel.Store.SetTrusted(id, true);
+        PersonRecord? person = _viewModel.People.FirstOrDefault(item =>
+            item.DeskId.Equals(id, StringComparison.OrdinalIgnoreCase) || Digits(item.DeskId) == id);
+        if (person != null)
+        {
+            person.IsTrusted = true;
+            if (!string.IsNullOrWhiteSpace(person.DisplayName))
+                _conversation.Inbox.SetName(id, person.DisplayName);
+        }
     }
 
     private string? Prompt(string message)
     {
         Window dialog = new()
         {
-            Title = "Connection code",
-            Width = 380,
+            Title = "First connection",
+            Width = 420,
             SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             Owner = this,
             ResizeMode = ResizeMode.NoResize,
-            Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(18, 20, 26))
+            WindowStyle = WindowStyle.None,
+            Background = (System.Windows.Media.Brush)FindResource("SurfaceBrush")
         };
         System.Windows.Controls.TextBox box = new()
         {
-            Height = 34,
-            Margin = new Thickness(0, 12, 0, 0),
+            Height = 48,
+            Margin = new Thickness(0, 16, 0, 0),
+            MaxLength = 6,
+            FontSize = 22,
+            FontWeight = FontWeights.SemiBold,
+            TextAlignment = TextAlignment.Center,
             VerticalContentAlignment = VerticalAlignment.Center
+        };
+        System.Windows.Controls.Button cancel = new()
+        {
+            Content = "Cancel",
+            Padding = new Thickness(16, 8, 16, 8),
+            Margin = new Thickness(0, 0, 8, 0)
         };
         System.Windows.Controls.Button ok = new()
         {
             Content = "Connect",
-            Width = 100,
-            Margin = new Thickness(0),
-            Padding = new Thickness(12, 6, 12, 6),
-            HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
+            Padding = new Thickness(18, 8, 18, 8),
             Style = (Style)FindResource("AccentButton")
         };
+        cancel.Click += (_, _) => dialog.DialogResult = false;
         ok.Click += (_, _) => dialog.DialogResult = true;
-        System.Windows.Controls.DockPanel footer = new() { Margin = new Thickness(0, 16, 0, 0), LastChildFill = false };
+        System.Windows.Controls.StackPanel footer = new()
+        {
+            Orientation = System.Windows.Controls.Orientation.Horizontal,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
+            Margin = new Thickness(0, 20, 0, 0)
+        };
+        footer.Children.Add(cancel);
         footer.Children.Add(ok);
-        System.Windows.Controls.StackPanel panel = new() { Margin = new Thickness(18) };
+        System.Windows.Controls.StackPanel panel = new() { Margin = new Thickness(24) };
+        panel.Children.Add(new System.Windows.Controls.TextBlock
+        {
+            Text = "Enter the 6-digit code",
+            FontSize = 18,
+            FontWeight = FontWeights.SemiBold
+        });
         panel.Children.Add(new System.Windows.Controls.TextBlock
         {
             Text = message,
             TextWrapping = TextWrapping.Wrap,
-            Foreground = System.Windows.Media.Brushes.White
+            Foreground = (System.Windows.Media.Brush)FindResource("MutedTextBrush"),
+            Margin = new Thickness(0, 8, 0, 0)
         });
         panel.Children.Add(box);
         panel.Children.Add(footer);
-        dialog.Content = panel;
+        dialog.Content = new System.Windows.Controls.Border
+        {
+            Background = (System.Windows.Media.Brush)FindResource("SurfaceRaisedBrush"),
+            BorderBrush = (System.Windows.Media.Brush)FindResource("BorderBrush"),
+            BorderThickness = new Thickness(1),
+            Child = panel
+        };
         box.Loaded += (_, _) => box.Focus();
         return dialog.ShowDialog() == true ? box.Text.Trim() : null;
     }
 
-    private void RemoteFrameReceived(byte[] data, int width, int height)
+    private void SessionFrameReceived(ConversationViewModel session, byte[] data, int width, int height)
     {
-        Dispatcher.BeginInvoke(() => EnsureRemote().ShowFrame(data, width, height), System.Windows.Threading.DispatcherPriority.Background);
+        DeliverFrame(session, window => window.ShowFrame(data, width, height));
     }
 
-    private void ViewEnded()
+    private void SessionDeltaReceived(ConversationViewModel session, byte[] data)
+    {
+        DeliverFrame(session, window => window.ShowDelta(data));
+    }
+
+    private void SessionH264Received(ConversationViewModel session, byte[] data, int width, int height)
+    {
+        DeliverFrame(session, window => window.ShowVideo(data, width, height));
+    }
+
+    private void SessionRegionReceived(ConversationViewModel session, byte[] data, int x, int y, int width, int height)
+    {
+        DeliverFrame(session, window => window.ShowRegion(data, x, y, width, height));
+    }
+
+    private void SessionCursorReceived(ConversationViewModel session, int x, int y, bool visible, int hotX, int hotY, byte[]? png)
+    {
+        DeliverFrame(session, window => window.ShowCursor(x, y, visible, hotX, hotY, png));
+    }
+
+    private void DeliverFrame(ConversationViewModel session, Action<RemoteWindow> deliver)
+    {
+        string key = WindowKey(session);
+        if (_remoteWindows.TryGetValue(key, out RemoteWindow? open))
+        {
+            deliver(open);
+            return;
+        }
+        Dispatcher.BeginInvoke(() => deliver(EnsureRemote(session)), System.Windows.Threading.DispatcherPriority.Render);
+    }
+
+    private void SessionPanel(ConversationViewModel session, string panel)
     {
         Dispatcher.BeginInvoke(() =>
         {
-            if (_remoteWindow == null)
-                return;
-            _remoteWindow.Close();
+            if (panel == "files")
+                EnsureFiles(session).Activate();
+            else
+                EnsureRemote(session).Activate();
         });
     }
 
-    private void ShowSidePanel(string panel)
+    private void SessionViewEnded(ConversationViewModel session)
     {
-        if (panel == "files")
-            EnsureFiles().Activate();
-        else
-            EnsureRemote().Activate();
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (_remoteWindows.TryGetValue(WindowKey(session), out RemoteWindow? window))
+                window.Close();
+        });
     }
 
-    private FilesWindow EnsureFiles()
+    private void SessionFilesClosed(ConversationViewModel session)
     {
-        if (_filesWindow == null)
+        Dispatcher.BeginInvoke(() =>
         {
-            _filesWindow = new FilesWindow(_conversation) { Owner = this };
-            _filesWindow.Closed += (_, _) => _filesWindow = null;
-        }
-        _filesWindow.Show();
-        return _filesWindow;
+            if (_filesWindows.TryGetValue(WindowKey(session), out FilesWindow? window))
+                window.Close();
+        });
     }
 
-    private RemoteWindow EnsureRemote()
+    private static string WindowKey(ConversationViewModel session)
     {
-        if (_remoteWindow == null)
+        string key = session.PeerKey;
+        return key.Length > 0 ? key : "session";
+    }
+
+    private FilesWindow EnsureFiles(ConversationViewModel? session = null)
+    {
+        session ??= _conversation;
+        string key = WindowKey(session);
+        if (!_filesWindows.TryGetValue(key, out FilesWindow? window))
         {
-            _remoteWindow = new RemoteWindow(_conversation, () => EnsureFiles().Activate()) { Owner = this };
-            _remoteWindow.Closed += (_, _) => _remoteWindow = null;
+            window = new FilesWindow(session);
+            window.Closed += (_, _) => _filesWindows.Remove(key);
+            _filesWindows[key] = window;
         }
-        _remoteWindow.Show();
-        return _remoteWindow;
+        window.Show();
+        return window;
+    }
+
+    private RemoteWindow EnsureRemote(ConversationViewModel? session = null)
+    {
+        session ??= _conversation;
+        string key = WindowKey(session);
+        if (!_remoteWindows.TryGetValue(key, out RemoteWindow? window))
+        {
+            ConversationViewModel bound = session;
+            window = new RemoteWindow(bound, () => _ = bound.RequestPermissionAsync("files")) { Owner = this };
+            window.Closed += (_, _) => _remoteWindows.Remove(key);
+            _remoteWindows[key] = window;
+        }
+        window.Show();
+        return window;
     }
 
     private void LoadSavedPeople()
     {
-        foreach (string id in _viewModel.Store.Favorites.Concat(_viewModel.Store.Recent).Concat(_conversation.ChatKeys).Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (string id in _viewModel.Store.Favorites.Concat(_viewModel.Store.Recent).Concat(App.Sessions.ChatKeys).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             string digits = Digits(id);
             _viewModel.Upsert(new PersonRecord
             {
                 DeskId = id,
-                DisplayName = digits.Length == 10 ? AppState.FormatDeskId(digits) : id,
+                DisplayName = _conversation.Inbox.NameFor(digits.Length == 10 ? digits : id),
                 IsFavorite = _viewModel.Store.Favorites.Contains(id),
                 IsTrusted = _viewModel.Store.Trusted.Contains(digits.Length == 10 ? digits : id)
             });
@@ -424,7 +595,7 @@ public partial class PeopleWindow : Window
 
     private void OpenIncomingChat()
     {
-        string? key = _conversation.LastIncomingKey;
+        string? key = App.Sessions.LastIncomingKey;
         if (string.IsNullOrWhiteSpace(key))
             return;
         PersonRecord? person = _viewModel.People.FirstOrDefault(item =>
@@ -435,8 +606,7 @@ public partial class PeopleWindow : Window
         _activePerson = person;
         _suppressSelect = true;
         PeopleList.SelectedItem = person;
-        _conversation.Activate(person.DeskId);
-        ConversationList.ItemsSource = _conversation.Transcript;
+        UsePeer(person.DeskId);
         ConversationTitle.Text = person.DisplayName;
         ConversationStatus.Text = _conversation.IsLive ? "Connected" : "Chat history";
     }
@@ -493,17 +663,14 @@ public partial class PeopleWindow : Window
     {
         if (PeopleList.SelectedItem is not PersonRecord person)
             return;
-        _conversation.DeleteHistory(person.DeskId);
+        App.Sessions.Get(person.DeskId).DeleteHistory(person.DeskId);
         _viewModel.Remove(person.DeskId);
         if (_activePerson?.DeskId.Equals(person.DeskId, StringComparison.OrdinalIgnoreCase) == true)
             _activePerson = null;
         ConversationList.ItemsSource = _conversation.Transcript;
         _peopleView?.Refresh();
         if (PeopleList.SelectedItem == null)
-        {
-            ConversationTitle.Text = "Select a person";
-            ConversationStatus.Text = "No active session";
-        }
+            ConversationPane.Visibility = Visibility.Collapsed;
     }
 
     private void SetSelectedFavorite(bool value)
@@ -523,9 +690,11 @@ public partial class PeopleWindow : Window
             return;
         }
         if (PeopleList.SelectedItem is not PersonRecord person)
+        {
+            ConversationPane.Visibility = Visibility.Collapsed;
             return;
-        _conversation.Activate(person.DeskId);
-        ConversationList.ItemsSource = _conversation.Transcript;
+        }
+        UsePeer(person.DeskId);
         ConversationTitle.Text = person.DisplayName;
 
         try
@@ -544,6 +713,23 @@ public partial class PeopleWindow : Window
             ConversationList.ItemsSource = _conversation.Transcript;
         ConversationStatus.Text = _conversation.Status;
         ConversationList.ScrollIntoView(ConversationList.Items.Count > 0 ? ConversationList.Items[^1] : null);
+        RefreshLivePresence();
+    }
+
+    private void SessionsChanged()
+    {
+        Dispatcher.BeginInvoke(RefreshLivePresence);
+    }
+
+    private void RefreshLivePresence()
+    {
+        foreach (PersonRecord person in _viewModel.People)
+        {
+            if (App.Sessions.IsLive(person.DeskId) || (!string.IsNullOrWhiteSpace(person.LastAddress) && App.Sessions.IsLive(person.LastAddress)))
+                person.Presence = Presence.InSession;
+            else if (person.Presence == Presence.InSession)
+                person.Presence = Presence.Online;
+        }
     }
 
     private async void SendClick(object sender, RoutedEventArgs e)
@@ -613,7 +799,6 @@ public partial class PeopleWindow : Window
 
     private void FilesClick(object sender, RoutedEventArgs e)
     {
-        EnsureFiles();
         ConversationStatus.Text = "Connecting if needed, then waiting for Allow...";
         _ = _conversation.RequestPermissionAsync("files", _stop.Token);
     }
@@ -719,6 +904,7 @@ public partial class PeopleWindow : Window
             return;
         person.IsFavorite = !person.IsFavorite;
         _viewModel.Store.SetFavorite(person.DeskId, person.IsFavorite);
+        _conversation.Inbox.SetName(person.DeskId, person.DisplayName);
         _peopleView?.Refresh();
         e.Handled = true;
     }
@@ -742,6 +928,7 @@ public partial class PeopleWindow : Window
             PersonRecord person = e.Person;
             person.IsFavorite = _viewModel.Store.Favorites.Contains(person.DeskId);
             person.IsTrusted = _viewModel.Store.Trusted.Contains(person.DeskId);
+            _conversation.Inbox.SetName(person.DeskId, person.DisplayName);
             _viewModel.Upsert(person);
             _peopleView?.Refresh();
         });
@@ -785,8 +972,7 @@ public partial class PeopleWindow : Window
         };
         _viewModel.Upsert(person);
         _peopleView?.Refresh();
-        _conversation.Activate(person.DeskId);
-        ConversationList.ItemsSource = _conversation.Transcript;
+        UsePeer(person.DeskId);
         NewChatBox.Clear();
         try
         {
@@ -823,34 +1009,6 @@ public partial class PeopleWindow : Window
         PermissionRequest? request = _conversation.Requests.LastOrDefault(item => item.Id == message.FileId && item.IsPending);
         if (request != null)
             await _conversation.AnswerPermissionAsync(request, false, _stop.Token);
-    }
-
-    private void ServerChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
-    {
-        ServerStatusText.Text = "Unsaved";
-    }
-
-    private void ServerKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
-    {
-        if (e.Key != Key.Enter)
-            return;
-        e.Handled = true;
-        ServerLostFocus(sender, e);
-    }
-
-    private void ServerLostFocus(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            _meetingClient.SetServerAddress(ServerBox.Text);
-            ServerBox.Text = _meetingClient.ServerAddress;
-            ServerStatusText.Text = "Connecting to " + _meetingClient.ServerAddress + "...";
-            _ = CheckPresenceAsync();
-        }
-        catch (UriFormatException)
-        {
-            ServerStatusText.Text = "Invalid server address";
-        }
     }
 
     private void PresenceTimerTick(object? sender, EventArgs e)

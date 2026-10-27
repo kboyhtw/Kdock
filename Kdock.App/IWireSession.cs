@@ -9,6 +9,7 @@ public interface IWireSession : IAsyncDisposable
 {
     bool IsConnected { get; }
     bool ProtocolMatched { get; }
+    string PeerDeskId { get; }
     event Action<WirePacket>? PacketReceived;
     event Action<string>? StatusChanged;
     event Action? ProtocolMismatch;

@@ -1,0 +1,45 @@
+<Window x:Class="Kdock.App.PairCodeWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="First connection"
+        Icon="pack://application:,,,/Resources/kdock.ico"
+        Width="460"
+        SizeToContent="Height"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource SurfaceBrush}">
+    <Border Background="{DynamicResource SurfaceRaisedBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="12" Margin="8">
+        <DockPanel Margin="28,24">
+            <DockPanel DockPanel.Dock="Top">
+                <Button DockPanel.Dock="Right" Content="✕" Click="CloseClick" Style="{StaticResource CaptionCloseButton}" Width="32" Height="28"/>
+                <TextBlock x:Name="TitleText" Text="First connection" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            </DockPanel>
+            <TextBlock x:Name="HintText" DockPanel.Dock="Top" TextWrapping="Wrap" Foreground="{DynamicResource MutedTextBrush}" Margin="0,8,0,20"/>
+
+            <StackPanel x:Name="ShowPanel" DockPanel.Dock="Top">
+                <UniformGrid Columns="6">
+                    <Border Style="{StaticResource CodeDigitBox}"><TextBlock x:Name="D0" Style="{StaticResource CodeDigit}"/></Border>
+                    <Border Style="{StaticResource CodeDigitBox}"><TextBlock x:Name="D1" Style="{StaticResource CodeDigit}"/></Border>
+                    <Border Style="{StaticResource CodeDigitBox}"><TextBlock x:Name="D2" Style="{StaticResource CodeDigit}"/></Border>
+                    <Border Style="{StaticResource CodeDigitBox}"><TextBlock x:Name="D3" Style="{StaticResource CodeDigit}"/></Border>
+                    <Border Style="{StaticResource CodeDigitBox}"><TextBlock x:Name="D4" Style="{StaticResource CodeDigit}"/></Border>
+                    <Border Style="{StaticResource CodeDigitBox}"><TextBlock x:Name="D5" Style="{StaticResource CodeDigit}"/></Border>
+                </UniformGrid>
+                <TextBlock Text="Valid for 10 minutes. They only need this once." FontSize="12" Foreground="{DynamicResource SubtleTextBrush}" Margin="0,14,0,0"/>
+                <DockPanel Margin="0,20,0,0">
+                    <Button DockPanel.Dock="Right" Content="Done" Click="OkClick" Style="{StaticResource AccentButton}" Padding="22,9"/>
+                    <Button Content="Copy code" Click="CopyClick" Padding="16,9"/>
+                </DockPanel>
+            </StackPanel>
+
+            <StackPanel x:Name="EnterPanel" DockPanel.Dock="Top" Visibility="Collapsed">
+                <TextBox x:Name="CodeBox" Height="56" MaxLength="6" FontSize="28" FontWeight="SemiBold" FontFamily="Segoe UI" TextAlignment="Center" Tag="6-digit code" KeyDown="CodeKeyDown"/>
+                <DockPanel Margin="0,20,0,0">
+                    <Button DockPanel.Dock="Right" Content="Connect" Click="OkClick" Style="{StaticResource AccentButton}" Padding="22,9"/>
+                    <Button Content="Cancel" Click="CloseClick" Padding="16,9"/>
+                </DockPanel>
+            </StackPanel>
+        </DockPanel>
+    </Border>
+</Window>

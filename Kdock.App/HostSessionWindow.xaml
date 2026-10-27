@@ -1,0 +1,61 @@
+<Window x:Class="Kdock.App.HostSessionWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Remote access"
+        Icon="pack://application:,,,/Resources/kdock.ico"
+        Width="420"
+        SizeToContent="Height"
+        WindowStyle="None"
+        ResizeMode="CanMinimize"
+        Topmost="True"
+        ShowInTaskbar="True"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource SurfaceBrush}">
+    <Border Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="12" Margin="8">
+        <DockPanel>
+            <Border DockPanel.Dock="Top" Background="{DynamicResource SurfaceRaisedBrush}" CornerRadius="12,12,0,0" Padding="8,4,4,4" MouseLeftButtonDown="HeaderDrag">
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="✕" Click="HideClick" Style="{StaticResource CaptionCloseButton}" Width="36" Height="32" ToolTip="Hide"/>
+                    <Button DockPanel.Dock="Right" Content="—" Click="MinimizeClick" Style="{StaticResource CaptionButton}" Width="36" Height="32" ToolTip="Minimize"/>
+                    <TextBlock Text="Someone is using this PC" FontWeight="SemiBold" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                </DockPanel>
+            </Border>
+            <StackPanel Margin="20,12,20,20">
+                <TextBlock x:Name="WhoText" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                <TextBlock x:Name="StatusText" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap" Margin="0,4,0,12"/>
+
+                <Border x:Name="PendingPanel" Visibility="Collapsed" Background="{DynamicResource SurfaceCardBrush}" CornerRadius="10" Padding="14" BorderBrush="{DynamicResource AccentBrush}" BorderThickness="1" Margin="0,0,0,12">
+                    <StackPanel>
+                        <TextBlock x:Name="PendingText" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+                            <Button Content="Deny" Click="DenyClick" MinWidth="96" Padding="18,8" Margin="0,0,8,0"/>
+                            <Button Content="Allow" Click="AllowClick" Style="{StaticResource AccentButton}" MinWidth="96" Padding="18,8"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border x:Name="ClipboardPanel" Background="{DynamicResource SurfaceCardBrush}" CornerRadius="10" Padding="14" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,0,0,12">
+                    <StackPanel>
+                        <TextBlock Text="Clipboard for this session" FontWeight="SemiBold"/>
+                        <TextBlock Text="Copy and paste between this PC and theirs. Turn it off any time for this connection only." TextWrapping="Wrap" Foreground="{DynamicResource SubtleTextBrush}" FontSize="12" Margin="0,4,0,10"/>
+                        <CheckBox x:Name="ClipboardCheck" Content="Allow clipboard sharing" Checked="ClipboardChanged" Unchecked="ClipboardChanged"/>
+                    </StackPanel>
+                </Border>
+
+                <Border x:Name="ScreenPanel" Visibility="Collapsed" Background="{DynamicResource SurfaceCardBrush}" CornerRadius="10" Padding="14" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,0,0,12">
+                    <StackPanel>
+                        <TextBlock Text="They can see your screen" FontWeight="SemiBold"/>
+                        <Button Content="Stop screen sharing" Click="StopScreenClick" Margin="0,12,0,0" Padding="12,8"/>
+                    </StackPanel>
+                </Border>
+
+                <Border x:Name="FilesPanel" Visibility="Collapsed" Background="{DynamicResource SurfaceCardBrush}" CornerRadius="10" Padding="14" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="They can browse your files" FontWeight="SemiBold"/>
+                        <Button Content="Stop file access" Click="StopFilesClick" Margin="0,12,0,0" Padding="12,8"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </DockPanel>
+    </Border>
+</Window>
